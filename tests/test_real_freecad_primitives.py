@@ -10,7 +10,7 @@ try:
 except ImportError:
     App = None
 
-from feature_selector import selector, resolve, create
+from robust_selector import create, resolve, selector
 from fs_selector import Step, candidates
 
 

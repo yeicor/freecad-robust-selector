@@ -28,11 +28,8 @@ class TestRealFreeCADComplexGeometry(unittest.TestCase):
         QtWidgets.QMessageBox.information = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Ok)
         QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Ok)
         QtWidgets.QMessageBox.critical = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Ok)
-        try:
-            Gui.showMainWindow()
-            Gui.activateWorkbench("FeatureSelectorWorkbench")
-        except Exception:
-            pass
+        Gui.showMainWindow()
+        Gui.activateWorkbench("RobustSelectorWorkbench")
 
     def setUp(self):
         self.doc_name = f"TestDocComplex_{id(self)}"

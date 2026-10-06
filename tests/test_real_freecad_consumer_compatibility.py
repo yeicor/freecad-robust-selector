@@ -221,7 +221,7 @@ class TestConsumerCompatibility(unittest.TestCase):
 
     def test_08_ambiguous_intent_is_an_honest_warning(self):
         """An unresolvable selector refuses loudly; the native value is untouched."""
-        from feature_selector import selector, create, bind
+        from robust_selector import bind, create, selector
         from fs_selector import Step
 
         box = self.doc.addObject("Part::Box", "Box")

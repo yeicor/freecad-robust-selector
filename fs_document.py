@@ -307,134 +307,103 @@ class ViewProviderSelector:
         vobj.Proxy = self
 
     def getIcon(self) -> str:
-        try:
-            import os
-            from fs_commands import _ICONS_DIR
-            icon_path = os.path.join(_ICONS_DIR, "FeatureSelector.svg")
-            if os.path.exists(icon_path):
-                return icon_path
-        except Exception:
-            pass
+        import os
+        from fs_commands import _ICONS_DIR
+        icon_path = os.path.join(_ICONS_DIR, "FeatureSelector.svg")
+        if os.path.exists(icon_path):
+            return icon_path
         return "FeatureSelector.svg"
 
     def doubleClicked(self, vobj: Any) -> bool:
-        """Double-clicking in the Model Tree edits the selector via the standard task flow.
-
-        Delegates to ``Gui.ActiveDocument.setEdit`` so FreeCAD itself handles the
-        standard "close/cancel the previous task" request when another operation
-        (Sketch, Pad, Pocket, ...) is currently being edited, exactly like native
-        operations behave.
-        """
-        try:
-            import FreeCADGui as Gui
-            gui_doc = getattr(Gui, "ActiveDocument", None)
-            if gui_doc is not None:
-                try:
-                    gui_doc.setEdit(getattr(vobj, "Object", None), 0)
-                    return True
-                except Exception:
-                    pass
-            # Fallback when no GUI document is available (headless tests).
-            from fs_gui import FeatureSelectorPanel
-            panel = FeatureSelectorPanel.instance()
-            panel.edit_selector_object(vobj.Object)
-            return True
-        except Exception:
-            return False
+        """Double-clicking in the Model Tree edits the selector via the standard task flow."""
+        import FreeCADGui as Gui
+        gui_doc = getattr(Gui, "ActiveDocument", None)
+        if gui_doc is not None:
+            return bool(gui_doc.setEdit(getattr(vobj, "Object", None), 0))
+        from fs_gui import FeatureSelectorPanel
+        panel = FeatureSelectorPanel.instance()
+        panel.edit_selector_object(vobj.Object)
+        return True
 
     def setEdit(self, vobj: Any, mode: int = 0) -> bool:
         """Enter edit mode through FreeCAD's standard task-view machinery."""
-        try:
-            from fs_gui import FeatureSelectorPanel
-            panel = FeatureSelectorPanel.instance()
-            panel.edit_selector_object(getattr(vobj, "Object", vobj))
-            return True
-        except Exception:
-            return False
+        from fs_gui import FeatureSelectorPanel
+        panel = FeatureSelectorPanel.instance()
+        panel.edit_selector_object(getattr(vobj, "Object", vobj))
+        return True
 
     def unsetEdit(self, vobj: Any, mode: int = 0) -> None:
         """Leave edit mode; cleanup only (FreeCAD core already closes the dialog)."""
-        try:
-            from fs_gui import FeatureSelectorPanel
-            panel = FeatureSelectorPanel.instance()
-            panel.notify_edit_closed()
-        except Exception:
-            pass
+        from fs_gui import FeatureSelectorPanel
+        panel = FeatureSelectorPanel.instance()
+        panel.notify_edit_closed()
 
     def setupContextMenu(self, vobj: Any, menu: Any) -> None:
         """Add context menu actions to the tree view item."""
         try:
             from PySide import QtGui
-            action_edit = QtGui.QAction("Edit Robust Selector…", menu)
-            action_edit.triggered.connect(lambda: self.doubleClicked(vobj))
-            menu.addAction(action_edit)
+        except ImportError:
+            from PySide6 import QtGui
 
-            action_preview = QtGui.QAction("Highlight in 3D View", menu)
-            action_preview.triggered.connect(lambda: self._preview(vobj))
-            menu.addAction(action_preview)
+        action_edit = QtGui.QAction("Edit Robust Selector…", menu)
+        action_edit.triggered.connect(lambda: self.doubleClicked(vobj))
+        menu.addAction(action_edit)
 
-            action_recompute = QtGui.QAction("Recompute Selector", menu)
-            action_recompute.triggered.connect(lambda: self._recompute(vobj))
-            menu.addAction(action_recompute)
+        action_preview = QtGui.QAction("Highlight in 3D View", menu)
+        action_preview.triggered.connect(lambda: self._preview(vobj))
+        menu.addAction(action_preview)
 
-            action_unbind = QtGui.QAction("Unbind from All Consumers", menu)
-            action_unbind.triggered.connect(lambda: self._unbind_all(vobj))
-            menu.addAction(action_unbind)
+        action_recompute = QtGui.QAction("Recompute Selector", menu)
+        action_recompute.triggered.connect(lambda: self._recompute(vobj))
+        menu.addAction(action_recompute)
 
-            action_copy_py = QtGui.QAction("Copy Python Code Snippet", menu)
-            action_copy_py.triggered.connect(lambda: self._copy_py(vobj))
-            menu.addAction(action_copy_py)
-        except Exception:
-            pass
+        action_unbind = QtGui.QAction("Unbind from All Consumers", menu)
+        action_unbind.triggered.connect(lambda: self._unbind_all(vobj))
+        menu.addAction(action_unbind)
+
+        action_copy_py = QtGui.QAction("Copy Python Code Snippet", menu)
+        action_copy_py.triggered.connect(lambda: self._copy_py(vobj))
+        menu.addAction(action_copy_py)
 
     def _preview(self, vobj: Any) -> None:
-        try:
-            from fs_freecad import add_selection
-            from fs_selector import Selector
-            obj = vobj.Object
-            selector = Selector.from_json(obj.Query)
-            if obj.BaseObject:
-                add_selection(selector.evaluate(obj.BaseObject), clear=True)
-        except Exception:
-            pass
+        from fs_freecad import add_selection
+        from fs_selector import Selector
+        obj = vobj.Object
+        selector = Selector.from_json(obj.Query)
+        if obj.BaseObject:
+            add_selection(selector.evaluate(obj.BaseObject), clear=True)
 
     def _copy_py(self, vobj: Any) -> None:
         try:
             from PySide import QtWidgets
-            from fs_selector import Selector, selector_to_python
-            obj = vobj.Object
-            selector = Selector.from_json(obj.Query)
-            source_name = getattr(getattr(obj, "BaseObject", None), "Name", "obj")
-            code = selector_to_python(selector, source_name)
-            cb = QtWidgets.QApplication.clipboard()
-            if cb is not None:
-                cb.setText(code)
-            if hasattr(App, "Console"):
-                App.Console.PrintMessage(f"FeatureSelector: Copied Python snippet for {obj.Label} to clipboard.\n")
-        except Exception:
-            pass
+        except ImportError:
+            from PySide6 import QtWidgets
+        from fs_selector import Selector, selector_to_python
+        obj = vobj.Object
+        selector = Selector.from_json(obj.Query)
+        source_name = getattr(getattr(obj, "BaseObject", None), "Name", "obj")
+        code = selector_to_python(selector, source_name)
+        cb = QtWidgets.QApplication.clipboard()
+        if cb is not None:
+            cb.setText(code)
+        if hasattr(App, "Console"):
+            App.Console.PrintMessage(f"RobustSelector: Copied Python snippet for {obj.Label} to clipboard.\n")
 
     def _recompute(self, vobj: Any) -> None:
-        try:
-            obj = vobj.Object
-            if hasattr(obj, "Proxy") and hasattr(obj.Proxy, "execute"):
-                obj.Proxy.execute(obj)
-            doc = getattr(obj, "Document", None)
-            if doc:
-                doc.recompute()
-        except Exception:
-            pass
+        obj = vobj.Object
+        if hasattr(obj, "Proxy") and hasattr(obj.Proxy, "execute"):
+            obj.Proxy.execute(obj)
+        doc = getattr(obj, "Document", None)
+        if doc:
+            doc.recompute()
 
     def _unbind_all(self, vobj: Any) -> None:
-        try:
-            from fs_bindings import unbind_selector
-            obj = vobj.Object
-            unbind_selector(obj)
-            doc = getattr(obj, "Document", None)
-            if doc:
-                doc.recompute()
-        except Exception:
-            pass
+        from fs_bindings import unbind_selector
+        obj = vobj.Object
+        unbind_selector(obj)
+        doc = getattr(obj, "Document", None)
+        if doc:
+            doc.recompute()
 
     def dumps(self):
         return None
@@ -535,8 +504,5 @@ def create_selector_object(
     obj.BaseObject = source_obj
     SelectorObjectProxy(obj)
     if hasattr(obj, "ViewObject") and obj.ViewObject is not None:
-        try:
-            ViewProviderSelector(obj.ViewObject)
-        except (AttributeError, RuntimeError):
-            pass
+        ViewProviderSelector(obj.ViewObject)
     return obj

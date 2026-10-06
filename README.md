@@ -198,7 +198,7 @@ The selector owns semantic intent. The target feature remains the owner of the a
 ## Scripting API
 
 ```python
-from feature_selector import selector, resolve, apply, create, bind
+from robust_selector import selector, resolve, apply, create, bind
 from fs_selector import Step
 
 q = selector("Face", [

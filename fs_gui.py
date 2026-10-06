@@ -258,31 +258,18 @@ class StepRow(QtWidgets.QWidget):
         self.result_label.setToolTip("Candidates remaining after this step")
         root.addWidget(self.result_label)
 
-        # ── Hidden widgets kept for test compatibility ──
+        # Remove button
+        self.remove_btn = QtWidgets.QToolButton()
+        self.remove_btn.setText("×")
+        self.remove_btn.setToolTip("Remove this step")
+        self.remove_btn.clicked.connect(lambda: self.remove_requested.emit())
+        root.addWidget(self.remove_btn)
+
+        # Force state control
         self.force = QtWidgets.QCheckBox()
         self.force.setChecked(bool(self.step.forced))
         self.force.setVisible(False)
         self.force.toggled.connect(self._force_changed)
-
-        self.insert_btn = QtWidgets.QToolButton()
-        self.insert_btn.setText("+")
-        self.insert_btn.setVisible(False)
-        self.insert_btn.clicked.connect(lambda: self.insert_requested.emit())
-
-        self.up_btn = QtWidgets.QToolButton()
-        self.up_btn.setText("↑")
-        self.up_btn.setVisible(False)
-        self.up_btn.clicked.connect(lambda: self.move_requested.emit(-1))
-
-        self.down_btn = QtWidgets.QToolButton()
-        self.down_btn.setText("↓")
-        self.down_btn.setVisible(False)
-        self.down_btn.clicked.connect(lambda: self.move_requested.emit(1))
-
-        self.remove_btn = QtWidgets.QToolButton()
-        self.remove_btn.setText("×")
-        self.remove_btn.setVisible(False)
-        self.remove_btn.clicked.connect(lambda: self.remove_requested.emit())
 
         # Enable right-click context menu
         self.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -792,9 +779,6 @@ class FeatureSelectorPanel:
         # Bottom stretch
         layout.addStretch(1)
 
-        # Legacy alias for tests that reference cand_highlight_btn
-        self.cand_highlight_btn = self.preview_btn
-
         # Shortcuts when panel has focus
         try:
             shortcut_capture = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+R"), root)
@@ -905,108 +889,52 @@ class FeatureSelectorPanel:
             return False
         if shown is False:
             return False
-        try:
-            self.load_selector_object(selector_obj)
-        except Exception:
-            return False
+        self.load_selector_object(selector_obj)
         return True
 
     def open_editor_for_object(self, selector_obj: Any) -> bool:
-        """Open *selector_obj* in the task view via the standard edit flow.
-
-        Prefers ``Gui.ActiveDocument.setEdit`` so FreeCAD tracks the object in
-        edit (tree highlight, standard close/cancel prompting when another task
-        is active). Falls back to the plain panel when headless or when setEdit
-        is unavailable.
-        """
+        """Open *selector_obj* in the task view via the standard edit flow."""
         if Gui:
-            try:
-                gui_doc = getattr(Gui, "ActiveDocument", None)
-                if gui_doc is not None:
-                    try:
-                        if gui_doc.setEdit(selector_obj, 0):
-                            return True
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            gui_doc = getattr(Gui, "ActiveDocument", None)
+            if gui_doc is not None and hasattr(gui_doc, "setEdit"):
+                if gui_doc.setEdit(selector_obj, 0):
+                    return True
         return self.edit_selector_object(selector_obj)
 
     def _note_dialog_closed(self) -> None:
         self._dialog_open = False
 
     def notify_edit_closed(self) -> None:
-        """Called when FreeCAD ends our edit session (unsetEdit): cleanup only.
-
-        The task dialog is already being closed by FreeCAD core at this point,
-        so this must NOT call ``closeDialog`` again — that could cancel the
-        native task that just replaced us.
-        """
+        """Called when FreeCAD ends our edit session (unsetEdit): cleanup only."""
         self._note_dialog_closed()
-        try:
-            if Gui is not None:
-                Gui.Selection.clearSelection()
-        except Exception:
-            pass
+        if Gui is not None:
+            Gui.Selection.clearSelection()
 
     def close_panel(self):
         owns_dialog = False
         if Gui:
-            try:
-                owns_dialog = self._is_own_dialog_active()
-            except Exception:
-                owns_dialog = False
-        # The dialog is going away on this path no matter what follows, so the
-        # open flag is cleared now: every FreeCAD close route (task-view
-        # OK/Cancel/X, resetEdit, plain closeDialog) funnels back through
-        # close_panel or notify_edit_closed, and a stale True would send the
-        # next show_panel down the reuse path onto deleted widgets.
+            owns_dialog = self._is_own_dialog_active()
         self._note_dialog_closed()
         if Gui:
-            # When WE own the edit session, resetEdit() exits it properly
-            # (FreeCAD then calls our unsetEdit). Never reset another object's
-            # edit session: that would cancel e.g. an in-progress Sketch edit.
-            try:
-                gui_doc = getattr(Gui, "ActiveDocument", None)
-                if gui_doc is not None:
-                    try:
-                        in_edit = gui_doc.getInEdit()
-                    except Exception:
-                        in_edit = None
-                    if in_edit is not None and self._edit_owns(in_edit):
-                        try:
-                            gui_doc.resetEdit()
-                            return
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            gui_doc = getattr(Gui, "ActiveDocument", None)
+            if gui_doc is not None and hasattr(gui_doc, "getInEdit"):
+                in_edit = gui_doc.getInEdit()
+                if in_edit is not None and self._edit_owns(in_edit):
+                    gui_doc.resetEdit()
+                    return
             if owns_dialog:
-                try:
-                    Gui.Control.closeDialog()
-                except Exception:
-                    pass
+                Gui.Control.closeDialog()
 
     def _edit_owns(self, in_edit: Any) -> bool:
         """True when FreeCAD's current edit session belongs to our selector."""
-        try:
-            edited_obj = getattr(in_edit, "Object", None)
-            if edited_obj is not None and self.selector_obj is not None:
-                try:
-                    if edited_obj is self.selector_obj:
-                        return True
-                except Exception:
-                    pass
-                try:
-                    if getattr(edited_obj, "Name", None) == getattr(self.selector_obj, "Name", None):
-                        return True
-                except Exception:
-                    pass
-            if in_edit is getattr(self.selector_obj, "ViewObject", None):
-                return True
-        except Exception:
-            pass
-        return False
+        if self.selector_obj is None or in_edit is None:
+            return False
+        edited_obj = getattr(in_edit, "Object", None)
+        if edited_obj is self.selector_obj:
+            return True
+        if edited_obj is not None and getattr(edited_obj, "Name", None) == getattr(self.selector_obj, "Name", None):
+            return True
+        return in_edit is getattr(self.selector_obj, "ViewObject", None)
 
     def accept(self):
         self.save_selector()
@@ -1048,17 +976,11 @@ class FeatureSelectorPanel:
 
     def _refuse_foreign_source(self, source_obj) -> bool:
         """Refuse geometry from another document with guidance; True when refused."""
-        try:
-            active = App.ActiveDocument
-        except Exception:
-            active = None
-        if active is None:
+        active = getattr(App, "ActiveDocument", None)
+        if active is None or source_obj is None:
             return False
-        try:
-            same = source_obj.Document.Name == active.Name
-        except Exception:
-            same = False
-        if same:
+        source_doc = getattr(source_obj, "Document", None)
+        if source_doc is not None and getattr(source_doc, "Name", None) == active.Name:
             return False
         _notify_user(
             Gui.getMainWindow(),
@@ -1932,18 +1854,11 @@ class FeatureSelectorPanel:
             # Seamless native workflow: leave the robust result in FreeCAD's normal
             # global selection so the next placement/operation task (Fillet/Chamfer
             # picker, Sketch attachment, DatumPlane, ...) can consume it directly.
-            try:
-                if self.source_obj is not None:
-                    add_selection(selector.evaluate(self.source_obj), clear=True)
-            except Exception:
-                pass
+            if self.source_obj is not None:
+                add_selection(selector.evaluate(self.source_obj), clear=True)
         except Exception as exc:
             _notify_user(Gui.getMainWindow(), "Feature Selector", f"Could not save:\n{exc}", "critical")
             self.status.setText(f"Save failed: {exc}")
-
-    def save_and_bind(self):
-        """Backward-compatible alias: the panel no longer has a separate bind step."""
-        return self.save_selector()
 
     def _set_source_label(self):
         if not self.source_obj:
@@ -1991,9 +1906,3 @@ class FeatureSelectorPanel:
 
     def close(self):
         self.close_panel()
-
-
-def refresh_selector_object(obj):
-    """Compatibility helper: execute one selector object once through its proxy."""
-    from fs_document import SelectorObjectProxy
-    SelectorObjectProxy(obj).execute(obj)

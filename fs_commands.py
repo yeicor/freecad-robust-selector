@@ -10,11 +10,8 @@ import FreeCAD as App
 import FreeCADGui as Gui
 
 _ICONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
-if os.path.isdir(_ICONS_DIR) and Gui is not None:
-    try:
-        Gui.addIconPath(_ICONS_DIR)
-    except Exception:
-        pass
+if os.path.isdir(_ICONS_DIR) and Gui is not None and hasattr(Gui, "addIconPath"):
+    Gui.addIconPath(_ICONS_DIR)
 
 
 def _panel():
@@ -315,9 +312,9 @@ def register_commands():
     for name, command in COMMANDS:
         try:
             Gui.addCommand(name, command)
-        except Exception:
-            # Re-loading an external workbench in one FreeCAD session can try to
-            # register a command twice; keep activation idempotent.
+        except RuntimeError:
+            # Re-loading a workbench in an existing FreeCAD session tries to
+            # re-register already registered command names.
             pass
         names.append(name)
     return names

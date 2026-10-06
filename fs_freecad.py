@@ -135,13 +135,15 @@ def transform_vector(obj: Any, v: Any) -> Any:
 
 
 def feature_center(obj: Any, shape: Any) -> Any:
-    try:
+    if shape is None:
+        raise ValueError("Cannot compute feature_center for None shape")
+    if hasattr(shape, "CenterOfMass"):
         return transform_point(obj, shape.CenterOfMass)
-    except Exception:
-        try:
-            return transform_point(obj, shape.BoundBox.Center)
-        except Exception:
-            return _zero_vector()
+    if hasattr(shape, "Point"):
+        return transform_point(obj, shape.Point)
+    if hasattr(shape, "BoundBox"):
+        return transform_point(obj, shape.BoundBox.Center)
+    raise ValueError(f"Shape {shape!r} has no center geometry (CenterOfMass, Point, or BoundBox)")
 
 
 def feature_area(shape: Any) -> float:
@@ -222,25 +224,21 @@ def representative_direction(obj: Any, shape: Any, kind: str) -> Optional[Any]:
             surface = shape.Surface
             u, v = surface.parameter(center_local)
             n = transform_vector(obj, shape.normalAt(u, v))
-            try:
-                return n.normalized()
-            except Exception:
+            if hasattr(n, "normalize"):
                 n.normalize()
-                return n
+            return n
         except Exception:
             return None
     if kind == "Edge":
-        try:
-            verts = list(getattr(shape, "Vertexes", []))
-            if len(verts) >= 2:
+        verts = list(getattr(shape, "Vertexes", []))
+        if len(verts) >= 2:
+            try:
                 d = transform_vector(obj, verts[-1].Point.sub(verts[0].Point))
-                try:
-                    return d.normalized()
-                except Exception:
+                if hasattr(d, "normalize"):
                     d.normalize()
-                    return d
-        except Exception:
-            pass
+                return d
+            except Exception:
+                pass
         try:
             curve = shape.Curve
             if hasattr(curve, "getParameterBounds"):
@@ -248,11 +246,9 @@ def representative_direction(obj: Any, shape: Any, kind: str) -> Optional[Any]:
             else:
                 first, last = (0.0, 1.0)
             d = transform_vector(obj, shape.tangentAt((first + last) / 2.0))
-            try:
-                return d.normalized()
-            except Exception:
+            if hasattr(d, "normalize"):
                 d.normalize()
-                return d
+            return d
         except Exception:
             return None
     return None
@@ -260,24 +256,22 @@ def representative_direction(obj: Any, shape: Any, kind: str) -> Optional[Any]:
 
 def bbox_tuple(obj: Any, shape: Any) -> tuple[float, float, float, float, float, float]:
     """Return global-axis-aligned bounding limits."""
-    try:
-        bb = shape.BoundBox
-        corners = []
-        for x in (bb.XMin, bb.XMax):
-            for y in (bb.YMin, bb.YMax):
-                for z in (bb.ZMin, bb.ZMax):
-                    if App is None:
-                        corners.append(_TupleVector(x, y, z))
-                    else:
-                        corners.append(App.Vector(x, y, z))
-        global_corners = [transform_point(obj, p) for p in corners]
-        xs = [p.x for p in global_corners]
-        ys = [p.y for p in global_corners]
-        zs = [p.z for p in global_corners]
-        return min(xs), min(ys), min(zs), max(xs), max(ys), max(zs)
-    except Exception:
-        c = feature_center(obj, shape)
-        return c.x, c.y, c.z, c.x, c.y, c.z
+    if shape is None or not hasattr(shape, "BoundBox"):
+        raise ValueError(f"Shape {shape!r} has no BoundBox")
+    bb = shape.BoundBox
+    corners = []
+    for x in (bb.XMin, bb.XMax):
+        for y in (bb.YMin, bb.YMax):
+            for z in (bb.ZMin, bb.ZMax):
+                if App is None:
+                    corners.append(_TupleVector(x, y, z))
+                else:
+                    corners.append(App.Vector(x, y, z))
+    global_corners = [transform_point(obj, p) for p in corners]
+    xs = [p.x for p in global_corners]
+    ys = [p.y for p in global_corners]
+    zs = [p.z for p in global_corners]
+    return min(xs), min(ys), min(zs), max(xs), max(ys), max(zs)
 
 
 def is_closed(shape: Any) -> Optional[bool]:
@@ -433,10 +427,8 @@ def feature_axis_info(obj: Any, shape: Any) -> tuple[Optional[Any], Optional[Any
 
     try:
         global_dir = transform_vector(obj, axis)
-        try:
-            global_dir = global_dir.normalized()
-        except Exception:
-            pass
+        if hasattr(global_dir, "normalize"):
+            global_dir.normalize()
         global_center = transform_point(obj, center)
         return global_dir, global_center
     except Exception:

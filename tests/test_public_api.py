@@ -1,7 +1,7 @@
 import unittest
 from dataclasses import dataclass
 
-from feature_selector import selector
+from robust_selector import selector
 from fs_selector import Step
 
 
@@ -25,12 +25,13 @@ class TestPublicApi(unittest.TestCase):
         )
         self.assertEqual(q.to_json(), q.from_json(q.to_json()).to_json())
 
-    def test_robust_selector_module_matches_feature_selector(self):
+    def test_robust_selector_exports(self):
         import robust_selector
-        import feature_selector
-        self.assertIs(robust_selector.selector, feature_selector.selector)
-        self.assertIs(robust_selector.resolve, feature_selector.resolve)
-        self.assertIs(robust_selector.apply, feature_selector.apply)
+        self.assertTrue(callable(robust_selector.selector))
+        self.assertTrue(callable(robust_selector.resolve))
+        self.assertTrue(callable(robust_selector.apply))
+        self.assertTrue(callable(robust_selector.create))
+        self.assertTrue(callable(robust_selector.bind))
 
 
 if __name__ == "__main__":

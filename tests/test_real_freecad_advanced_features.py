@@ -47,7 +47,7 @@ class TestRealFreeCADAdvancedFeatures(unittest.TestCase):
         QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Ok)
         QtWidgets.QMessageBox.critical = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Ok)
         Gui.showMainWindow()
-        Gui.activateWorkbench("FeatureSelectorWorkbench")
+        Gui.activateWorkbench("RobustSelectorWorkbench")
         cls.doc = App.newDocument("TestAdvancedFeaturesDoc")
 
     @classmethod

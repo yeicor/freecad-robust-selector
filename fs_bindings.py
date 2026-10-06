@@ -51,8 +51,6 @@ BINDINGS_PROPERTY = "Bindings"
 BINDING_STATUS_PROPERTY = "BindingStatus"
 TARGET_LINK_PROPERTY = "FeatureSelectorSources"
 TARGET_INFO_PROPERTY = "FeatureSelectorBindings"
-LEGACY_TARGET_LINK_PROPERTY = "RobustSelectionSources"
-LEGACY_TARGET_INFO_PROPERTY = "RobustSelectionBindings"
 BINDING_VERSION = 3
 
 
@@ -188,7 +186,7 @@ def property_type_name(obj: Any, prop_name: str) -> str:
             declared = getter(prop_name)
             if declared:
                 return str(declared)
-        except Exception:
+        except AttributeError:
             pass
     try:
         value = getattr(obj, prop_name)
@@ -196,7 +194,7 @@ def property_type_name(obj: Any, prop_name: str) -> str:
         if declared:
             return str(declared() if callable(declared) else declared)
         return _typename(value)
-    except Exception:
+    except AttributeError:
         return ""
 
 
@@ -213,31 +211,24 @@ def property_mode(obj: Any, prop_name: str) -> Optional[str]:
     return None
 
 
-def property_editor_mode(obj: Any, prop_name: str) -> int:
-    getter = getattr(obj, "getEditorMode", None)
-    if callable(getter):
-        try:
-            return int(getter(prop_name))
-        except Exception:
-            pass
-    return 0
-
-
 def is_property_writable(obj: Any, prop_name: str) -> bool:
-    # FreeCAD's documented editor-mode bit 0 means read-only.  Hidden supported
-    # properties are intentionally omitted from the explicit property picker.
-    return (property_editor_mode(obj, prop_name) & 0b11) == 0
+    """Return whether a property is writable and not an internal hidden property."""
+    getter = getattr(obj, "getEditorMode", None)
+    if not callable(getter):
+        return hasattr(obj, prop_name)
+    try:
+        mode = getter(prop_name)
+    except (AttributeError, ValueError):
+        return hasattr(obj, prop_name)
+    if isinstance(mode, (list, tuple, set)):
+        return "Hidden" not in mode and 2 not in mode
+    if isinstance(mode, int):
+        return (mode & 0b10) == 0
+    return hasattr(obj, prop_name)
 
 
 def read_property_value(obj: Any, prop_name: str) -> Any:
-    try:
-        return getattr(obj, prop_name)
-    except Exception:
-        return None
-
-
-# Backward-compatible internal alias used by older tests/modules.
-_read_property_value = read_property_value
+    return getattr(obj, prop_name, None)
 
 
 def _edge_index(subname: str) -> Optional[int]:
@@ -703,21 +694,6 @@ def ensure_target_link_properties(target_obj: Any) -> None:
         target_obj, "App::PropertyStringList", TARGET_INFO_PROPERTY, "Robust Selection",
         "Explicit robust selector/property bindings", [],
     )
-    # Migrate only if an older workbench revision left the old visible metadata behind.
-    if LEGACY_TARGET_LINK_PROPERTY in set(getattr(target_obj, "PropertiesList", []) or []):
-        old = list(getattr(target_obj, LEGACY_TARGET_LINK_PROPERTY) or [])
-        new = list(getattr(target_obj, TARGET_LINK_PROPERTY) or [])
-        for selector in old:
-            if selector not in new:
-                new.append(selector)
-        setattr(target_obj, TARGET_LINK_PROPERTY, new)
-    if LEGACY_TARGET_INFO_PROPERTY in set(getattr(target_obj, "PropertiesList", []) or []):
-        old = list(getattr(target_obj, LEGACY_TARGET_INFO_PROPERTY) or [])
-        new = list(getattr(target_obj, TARGET_INFO_PROPERTY) or [])
-        for item in old:
-            if item not in new:
-                new.append(item)
-        setattr(target_obj, TARGET_INFO_PROPERTY, new)
     target_obj.setEditorMode(TARGET_LINK_PROPERTY, 1)
     target_obj.setEditorMode(TARGET_INFO_PROPERTY, 1)
 

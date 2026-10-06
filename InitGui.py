@@ -1,20 +1,11 @@
-"""FreeCAD Feature Selector workbench GUI initialization."""
+"""FreeCAD Robust Selector workbench GUI initialization."""
 from __future__ import annotations
 
 import os
 
 import FreeCADGui as Gui
 
-try:
-    _ROOT = os.path.dirname(os.path.abspath(__file__))
-except NameError:
-    try:
-        import fs_commands
-        _ROOT = os.path.dirname(os.path.abspath(fs_commands.__file__))
-    except (ImportError, AttributeError):
-        import FreeCAD as App
-        _ROOT = os.path.join(App.getUserAppDataDir(), "Mod", "FeatureSelector")
-
+_ROOT = os.path.dirname(os.path.abspath(__file__))
 Gui.addIconPath(os.path.join(_ROOT, "icons"))
 
 from fs_commands import CONTEXT_COMMANDS, MENU_COMMANDS, TOOLBAR_COMMANDS, register_commands
@@ -41,8 +32,6 @@ class RobustSelectorWorkbench(Gui.Workbench):
         self._initialized = True
 
     def Activated(self):
-        # The workbench does not capture selection or show a panel implicitly.
-        # The first, discoverable action is the explicit Robust Selection command.
         return
 
     def Deactivated(self):
@@ -52,22 +41,11 @@ class RobustSelectorWorkbench(Gui.Workbench):
         return "Gui::PythonWorkbench"
 
 
-class FeatureSelectorWorkbench(RobustSelectorWorkbench):
-    """Backwards-compatible alias for FeatureSelectorWorkbench."""
-    pass
-
-
 existing_wbs = Gui.listWorkbenches()
 if "RobustSelectorWorkbench" not in existing_wbs:
     Gui.addWorkbench(RobustSelectorWorkbench())
-if "FeatureSelectorWorkbench" not in existing_wbs:
-    Gui.addWorkbench(FeatureSelectorWorkbench())
 
-# Attempt to inject into PartDesign so the user doesn't have to switch workbenches
-try:
-    _commands = register_commands()
-    pd = Gui.getWorkbench("PartDesignWorkbench")
+pd = Gui.getWorkbench("PartDesignWorkbench")
+if pd is not None and hasattr(pd, "appendToolbar"):
+    register_commands()
     pd.appendToolbar("Robust Selection", TOOLBAR_COMMANDS)
-except Exception:
-    pass
-

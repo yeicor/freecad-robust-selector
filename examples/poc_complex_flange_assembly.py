@@ -18,7 +18,7 @@ import Part
 import PartDesign
 import Sketcher
 
-from feature_selector import selector, create, bind
+from robust_selector import bind, create, selector
 from fs_selector import Step
 
 

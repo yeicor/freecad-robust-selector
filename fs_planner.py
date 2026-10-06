@@ -352,11 +352,7 @@ def _candidate_steps(items: list[Candidate], target: list[Candidate], max_take: 
         steps.extend(_separating_compare(items, target, metric))
         for direction in ("min", "max"):
             step = Step("extreme", {"metric": metric, "direction": direction, "tolerance": tol})
-            try:
-                trial = apply_step(items, step)
-            except Exception:
-                trial = []
-            if trial and len(trial) < len(items) and _contains_target(trial, target_keys):
+            if _valid_shrinking_step(items, target, step):
                 steps.append(step)
 
     # Rank-based selectors remain a deliberate last resort.
@@ -384,11 +380,11 @@ def _forced_step_valid(state: list[Candidate], target_keys: set[tuple[str, str]]
     return trial
 
 
-def _infer_kind(pool: list[Candidate], fallback: str = "Shape") -> str:
+def _infer_kind(pool: list[Candidate], default: str = "Shape") -> str:
     if not pool:
-        return fallback
+        return default
     ref = pool[0].ref
-    return str(getattr(ref, "kind", fallback) or fallback)
+    return str(getattr(ref, "kind", default) or default)
 
 
 def _search(
@@ -397,18 +393,12 @@ def _search(
     *,
     kind: str = "Shape",
     prefix: tuple[Step, ...] = (),
-    forced_suffix: tuple[Step, ...] = (),
     forced_positions: Optional[dict[int, Step]] = None,
     max_depth: int = 6,
     max_results: int = 30,
     max_variants_per_state: int = 5,
 ) -> list[Plan]:
-    """Bounded breadth-first search.
-
-    ``forced_suffix`` preserves forced steps in order after the fixed prefix.
-    ``forced_positions`` is stricter: a forced step must occur at that exact
-    chain index, while automatic steps may be inserted between forced anchors.
-    """
+    """Bounded breadth-first search with exact position preservation."""
     state = list(pool)
     for step in prefix:
         try:
@@ -424,17 +414,16 @@ def _search(
             return []
 
     found: dict[str, Plan] = {}
-    frontier: list[tuple[list[Step], list[Candidate], int]] = [(list(prefix), state, 0)]
-    seen: dict[tuple[tuple[tuple[str, str], ...], int], list[tuple]] = {}
+    frontier: list[tuple[list[Step], list[Candidate]]] = [(list(prefix), state)]
+    seen: dict[tuple[tuple[str, str], ...], list[tuple]] = {}
     min_solution_depth: Optional[int] = None
 
     while frontier:
-        next_frontier: list[tuple[list[Step], list[Candidate], int]] = []
-        for chain, current, forced_index in frontier:
+        next_frontier: list[tuple[list[Step], list[Candidate]]] = []
+        for chain, current in frontier:
             exact = _same_target(current, target_keys)
             positions_passed = not forced_positions or all(len(chain) > pos for pos in forced_positions)
-            suffix_passed = forced_index == len(forced_suffix)
-            if exact and positions_passed and suffix_passed:
+            if exact and positions_passed:
                 selector = Selector(kind, tuple(chain), len(target_keys), "planned")
                 found.setdefault(selector.to_json(), Plan(selector, _plan_score(chain), selector.describe()))
                 if min_solution_depth is None or len(chain) < min_solution_depth:
@@ -447,25 +436,15 @@ def _search(
                 continue
 
             forced_at_position = forced_positions.get(len(chain)) if forced_positions else None
-            forced_from_suffix = None if forced_at_position is not None else (
-                forced_suffix[forced_index] if forced_index < len(forced_suffix) else None
-            )
-
             if forced_at_position is not None:
                 auto_steps = [Step(forced_at_position.op, dict(forced_at_position.args), forced=True)]
             else:
                 auto_steps = _candidate_steps(current, [c for c in current if _key(c) in target_keys])
-                if forced_from_suffix is not None:
-                    auto_steps = [step for step in auto_steps if _step_key(step) != _step_key(forced_from_suffix)]
-                    auto_steps.append(Step(forced_from_suffix.op, dict(forced_from_suffix.args), forced=True))
-                # Sort candidate steps by stability cost and cap branching to keep search instantaneous
                 auto_steps.sort(key=_step_cost)
                 auto_steps = auto_steps[:35]
 
+            is_forced = forced_at_position is not None
             for step in auto_steps:
-                is_forced_position = forced_at_position is not None
-                is_forced_suffix = forced_from_suffix is not None and _step_key(step) == _step_key(forced_from_suffix)
-                is_forced = is_forced_position or is_forced_suffix
                 try:
                     trial = apply_step(current, step)
                 except (KeyError, ValueError, TypeError, ZeroDivisionError):
@@ -474,14 +453,13 @@ def _search(
                     continue
                 if not is_forced and len(trial) >= len(current):
                     continue
-                next_progress = forced_index + 1 if is_forced_suffix else forced_index
-                state_key = (_state_key(trial), next_progress)
+                state_key = _state_key(trial)
                 chain_key = tuple(_step_key(item) + (bool(item.forced),) for item in chain + [step])
                 variants = seen.setdefault(state_key, [])
                 if chain_key in variants or len(variants) >= max_variants_per_state:
                     continue
                 variants.append(chain_key)
-                next_frontier.append((chain + [step], trial, next_progress))
+                next_frontier.append((chain + [step], trial))
         frontier = next_frontier
 
     return sorted(found.values(), key=lambda plan: plan.score)[:max_results]
@@ -513,10 +491,11 @@ def plan_selectors(
     if _same_target(pool, target_keys):
         selector = Selector(kind, (), len(target_keys), "planned")
         return [Plan(selector, _plan_score(()), selector.describe())]
-    required = tuple(step for step in required_steps if step.forced)
     positions = required_positions
-    if positions is None and required:
-        positions = {index: step for index, step in enumerate(required)}
+    if positions is None:
+        required = tuple(step for step in required_steps if step.forced)
+        if required:
+            positions = {index: step for index, step in enumerate(required)}
     return _search(
         pool,
         target_keys,
@@ -532,28 +511,16 @@ def complete_selector(
     kind: str,
     target_subnames: Iterable[str],
     prefix_steps: Iterable[Step] = (),
-    forced_suffix: Iterable[Step] = (),
     forced_positions: Optional[dict[int, Step]] = None,
     max_added_depth: int = 6,
     max_results: int = 12,
 ) -> list[Plan]:
-    """Replan lower rows after an edit while retaining the edited prefix verbatim.
-
-    ``forced_positions`` preserves the visible row positions of all downstream
-    forced steps. ``forced_suffix`` remains as a compatibility fallback for callers
-    from older releases that only tracked relative order.
-    """
+    """Replan lower rows after an edit while retaining the edited prefix verbatim."""
     pool, target_keys = _pool_and_target_keys(obj, kind, target_subnames)
     if not any(_key(c) in target_keys for c in pool):
         return []
     prefix = tuple(prefix_steps)
     positions = dict(forced_positions or {})
-    if not positions:
-        suffix = tuple(step for step in forced_suffix if step.forced)
-        if suffix:
-            positions = {len(prefix) + index: step for index, step in enumerate(suffix)}
-    else:
-        suffix = ()
     if not prefix and _same_target(pool, target_keys) and not positions:
         selector = Selector(kind, (), len(target_keys), "planned")
         return [Plan(selector, _plan_score(()), selector.describe())]

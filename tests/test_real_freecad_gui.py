@@ -14,7 +14,7 @@ except ImportError:
     App = None
     Gui = None
 
-from feature_selector import selector, create, bind
+from robust_selector import bind, create, selector
 from fs_selector import Step
 
 
@@ -36,7 +36,7 @@ class TestRealFreeCADGui(unittest.TestCase):
         QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Ok)
         QtWidgets.QMessageBox.critical = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Ok)
         Gui.showMainWindow()
-        Gui.activateWorkbench("FeatureSelectorWorkbench")
+        Gui.activateWorkbench("RobustSelectorWorkbench")
         cls.doc = App.newDocument("TestRealGuiDoc")
 
     @classmethod
@@ -44,10 +44,10 @@ class TestRealFreeCADGui(unittest.TestCase):
         App.closeDocument(cls.doc.Name)
 
     def test_01_workbench_registered_and_active(self):
-        """Verify RobustSelectorWorkbench and FeatureSelectorWorkbench are loaded and active in FreeCADGui."""
+        """Verify RobustSelectorWorkbench is loaded and active in FreeCADGui."""
+        self.assertEqual(Gui.activeWorkbench().name(), "RobustSelectorWorkbench")
         wbs = Gui.listWorkbenches()
         self.assertIn("RobustSelectorWorkbench", wbs)
-        self.assertIn("FeatureSelectorWorkbench", wbs)
 
     def test_02_panel_learn_and_route_planning(self):
         """Verify panel captures selection, auto-plans routes, and displays results."""

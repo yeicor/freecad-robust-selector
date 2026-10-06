@@ -134,7 +134,7 @@ class TestCrossDocumentReferences(unittest.TestCase):
 
     def test_03_direct_cross_document_source_is_refused(self):
         """A source in another document raises instead of building debris."""
-        from feature_selector import selector as make_selector
+        from robust_selector import selector as make_selector
         from fs_bindings import prepare_robustify_plan
         from fs_document import create_selector_object
         from fs_selector import Step
