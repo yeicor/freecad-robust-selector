@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="topFace" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#5dade2"/>
+      <stop offset="100%" stop-color="#2e86c1"/>
+    </linearGradient>
+    <linearGradient id="leftFace" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2874a6"/>
+      <stop offset="100%" stop-color="#1b4f72"/>
+    </linearGradient>
+    <linearGradient id="rightFace" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3498db"/>
+      <stop offset="100%" stop-color="#21618c"/>
+    </linearGradient>
+    <linearGradient id="shieldFeat" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2ecc71"/>
+      <stop offset="100%" stop-color="#1e8449"/>
+    </linearGradient>
+  </defs>
+  <!-- Isometric 3D Feature Cube -->
+  <!-- Top Face -->
+  <polygon points="26,6 46,17 26,28 6,17" fill="url(#topFace)" stroke="#1a5276" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Left Face -->
+  <polygon points="6,17 26,28 26,50 6,39" fill="url(#leftFace)" stroke="#1a5276" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Right Face -->
+  <polygon points="26,28 46,17 46,39 26,50" fill="url(#rightFace)" stroke="#1a5276" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Shield emblem in foreground -->
+  <path d="M44 26 C50 26 55 28 57 31 C57 44 50 52 44 56 C38 52 31 44 31 31 C33 28 38 26 44 26 Z" 
+        fill="url(#shieldFeat)" stroke="#145a32" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Bolt or check inside emblem -->
+  <path d="M38 40 L42 44 L50 34" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

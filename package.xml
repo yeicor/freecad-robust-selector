@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>Robust Selector</name>
+  <description>Explicit, persistent feature-based selectors for FreeCAD with geometric query planning, editable design intent, explicit native-property binding, LinkSub/LinkSubList integration, object-level Link support, and conservative legacy Part edge-list projection.</description>
+  <version>0.6.0</version>
+  <date>2026-10-06</date>
+  <maintainer email="">Robust Selector Contributors</maintainer>
+  <license file="LICENSE">LGPL-2.1-or-later</license>
+  <url type="repository" branch="main">https://github.com/yeicor/freecad-robust-selector</url>
+  <icon>icons/FeatureSelector.svg</icon>
+  <content>
+    <workbench>
+      <name>Robust Selector</name>
+      <classname>RobustSelectorWorkbench</classname>
+      <subdirectory>./</subdirectory>
+      <icon>icons/FeatureSelector.svg</icon>
+      <tag>selection</tag>
+      <tag>topology</tag>
+      <tag>robustness</tag>
+      <tag>parametric</tag>
+      <tag>toponaming</tag>
+    </workbench>
+  </content>
+</package>

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="shieldAll" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f39c12"/>
+      <stop offset="100%" stop-color="#d35400"/>
+    </linearGradient>
+  </defs>
+  <!-- Background document / layers -->
+  <rect x="8" y="6" width="36" height="44" rx="4" fill="#ecf0f1" stroke="#7f8c8d" stroke-width="2"/>
+  <line x1="14" y1="14" x2="30" y2="14" stroke="#bdc3c7" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="14" y1="21" x2="36" y2="21" stroke="#bdc3c7" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="14" y1="28" x2="28" y2="28" stroke="#bdc3c7" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Foreground document stacked -->
+  <rect x="16" y="14" width="36" height="44" rx="4" fill="#ffffff" stroke="#2c3e50" stroke-width="2"/>
+  <line x1="22" y1="22" x2="38" y2="22" stroke="#34495e" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="22" y1="29" x2="44" y2="29" stroke="#34495e" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Golden / Amber Shield covering both (batch protect) -->
+  <path d="M42 24 C49 24 55 27 57 30 C57 44 49 53 42 58 C35 53 27 44 27 30 C29 27 35 24 42 24 Z" 
+        fill="url(#shieldAll)" stroke="#935116" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Star or double checkmark inside badge -->
+  <polygon points="42,32 44.5,37.5 50.5,38 46,42 47.5,48 42,44.8 36.5,48 38,42 33.5,38 39.5,37.5" fill="#ffffff"/>
+</svg>
