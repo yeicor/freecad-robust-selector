@@ -67,34 +67,202 @@ PREDICATE_NAMES = (
 )
 
 
-@dataclass(frozen=True)
 class Candidate:
-    ref: FeatureRef
-    center: Any
-    geom_type: str
-    shape: Any = None
-    direction: Any = None
-    area: float = 0.0
-    length: float = 0.0
-    volume: float = 0.0
-    radius: Optional[float] = None
-    perimeter: float = 0.0
-    bbox: tuple[float, float, float, float, float, float] = (0.0,) * 6
-    closed: Optional[bool] = None
-    valid: Optional[bool] = None
-    vertex_count: int = 0
-    edge_count: int = 0
-    wire_count: int = 0
-    face_count: int = 0
-    shell_count: int = 0
-    solid_count: int = 0
-    hole_count: int = 0
-    adjacent_face_count: int = 0
-    vertex_valence: int = 0
-    source_bbox: tuple[float, float, float, float, float, float] = (0.0,) * 6
-    convexity: Optional[str] = None
-    axis_direction: Any = None
-    axis_point: Any = None
+    def __init__(
+        self,
+        ref: FeatureRef,
+        center: Any = None,
+        geom_type: str = "",
+        shape: Any = None,
+        direction: Any = None,
+        area: float = 0.0,
+        length: float = 0.0,
+        volume: float = 0.0,
+        radius: Optional[float] = None,
+        perimeter: float = 0.0,
+        bbox: tuple[float, float, float, float, float, float] = (0.0,) * 6,
+        closed: Optional[bool] = None,
+        valid: Optional[bool] = None,
+        vertex_count: int = 0,
+        edge_count: int = 0,
+        wire_count: int = 0,
+        face_count: int = 0,
+        shell_count: int = 0,
+        solid_count: int = 0,
+        hole_count: int = 0,
+        adjacent_face_count: int = 0,
+        vertex_valence: int = 0,
+        source_bbox: tuple[float, float, float, float, float, float] = (0.0,) * 6,
+        convexity: Optional[str] = None,
+        axis_direction: Any = None,
+        axis_point: Any = None,
+        _obj: Any = None,
+    ):
+        self.ref = ref
+        self.shape = shape
+        self._obj = _obj
+        self._center = center
+        self._geom_type = geom_type
+        self._direction = direction
+        self._area = area
+        self._length = length
+        self._volume = volume
+        self._radius = radius
+        self._perimeter = perimeter
+        self._bbox = bbox if bbox != (0.0,) * 6 else None
+        self._closed = closed
+        self._valid = valid
+        self._vertex_count = vertex_count
+        self._edge_count = edge_count
+        self._wire_count = wire_count
+        self._face_count = face_count
+        self._shell_count = shell_count
+        self._solid_count = solid_count
+        self._hole_count = hole_count
+        self.adjacent_face_count = adjacent_face_count
+        self.vertex_valence = vertex_valence
+        self.source_bbox = source_bbox
+        self.convexity = convexity
+        self._axis_direction = axis_direction
+        self._axis_point = axis_point
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, Candidate):
+            return False
+        return self.ref == other.ref
+
+    def __hash__(self) -> int:
+        return hash(self.ref)
+
+    @property
+    def center(self) -> Any:
+        if self._center is None:
+            if self.shape is not None:
+                self._center = feature_center(self._obj, self.shape)
+            else:
+                import FreeCAD as App
+                self._center = App.Vector(0, 0, 0)
+        return self._center
+
+    @property
+    def geom_type(self) -> str:
+        if not self._geom_type:
+            if self.shape is not None:
+                self._geom_type = geometry_type(self.shape)
+            else:
+                self._geom_type = ""
+        return self._geom_type
+
+    @property
+    def direction(self) -> Any:
+        if self._direction is None and self.shape is not None:
+            self._direction = representative_direction(self._obj, self.shape, self.ref.kind)
+        return self._direction
+
+    @property
+    def area(self) -> float:
+        if not self._area and self.shape is not None:
+            self._area = feature_area(self.shape)
+        return self._area
+
+    @property
+    def length(self) -> float:
+        if not self._length and self.shape is not None:
+            self._length = feature_length(self.shape)
+        return self._length
+
+    @property
+    def volume(self) -> float:
+        if not self._volume and self.shape is not None:
+            self._volume = feature_volume(self.shape)
+        return self._volume
+
+    @property
+    def radius(self) -> Optional[float]:
+        if self._radius is None and self.shape is not None:
+            self._radius = feature_radius(self.shape)
+        return self._radius
+
+    @property
+    def perimeter(self) -> float:
+        if not self._perimeter and self.shape is not None:
+            self._perimeter = feature_perimeter(self.shape)
+        return self._perimeter
+
+    @property
+    def bbox(self) -> tuple[float, float, float, float, float, float]:
+        if self._bbox is None:
+            if self.shape is not None:
+                self._bbox = bbox_tuple(self._obj, self.shape)
+            else:
+                self._bbox = (0.0,) * 6
+        return self._bbox
+
+    @property
+    def closed(self) -> Optional[bool]:
+        if self._closed is None and self.shape is not None:
+            self._closed = is_closed(self.shape)
+        return self._closed
+
+    @property
+    def valid(self) -> Optional[bool]:
+        if self._valid is None and self.shape is not None:
+            self._valid = is_valid(self.shape)
+        return self._valid
+
+    @property
+    def hole_count(self) -> int:
+        if not self._hole_count and self.shape is not None and self.ref.kind == "Face":
+            self._hole_count = face_hole_count(self.shape)
+        return self._hole_count
+
+    @property
+    def axis_direction(self) -> Any:
+        if self._axis_direction is None and self.shape is not None:
+            self._axis_direction, self._axis_point = feature_axis_info(self._obj, self.shape)
+        return self._axis_direction
+
+    @property
+    def axis_point(self) -> Any:
+        if self._axis_point is None and self.shape is not None:
+            self._axis_direction, self._axis_point = feature_axis_info(self._obj, self.shape)
+        return self._axis_point
+
+    def _ensure_counts(self) -> None:
+        if not self._face_count and not self._edge_count and not self._vertex_count and self.shape is not None:
+            vc, ec, wc, fc, shc, soc = _shape_counts(self.shape)
+            self._vertex_count, self._edge_count, self._wire_count = vc, ec, wc
+            self._face_count, self._shell_count, self._solid_count = fc, shc, soc
+
+    @property
+    def vertex_count(self) -> int:
+        self._ensure_counts()
+        return self._vertex_count
+
+    @property
+    def edge_count(self) -> int:
+        self._ensure_counts()
+        return self._edge_count
+
+    @property
+    def wire_count(self) -> int:
+        self._ensure_counts()
+        return self._wire_count
+
+    @property
+    def face_count(self) -> int:
+        self._ensure_counts()
+        return self._face_count
+
+    @property
+    def shell_count(self) -> int:
+        self._ensure_counts()
+        return self._shell_count
+
+    @property
+    def solid_count(self) -> int:
+        self._ensure_counts()
+        return self._solid_count
 
     @property
     def diameter(self) -> float:
@@ -134,7 +302,6 @@ class Candidate:
 
     @property
     def compactness(self) -> float:
-        # 1.0 is an ideal circular planar boundary; lower values are less compact.
         if self.perimeter <= EPS or self.area <= EPS:
             return float("nan")
         return 4.0 * math.pi * self.area / (self.perimeter * self.perimeter)
@@ -158,31 +325,75 @@ class Candidate:
         return math.hypot(self.center.x, self.center.y)
 
     def metric(self, name: str) -> float:
-        values = {
-            "x": self.center.x, "y": self.center.y, "z": self.center.z,
-            "distance": self.distance, "length": self.length, "perimeter": self.perimeter,
-            "area": self.area, "compactness": self.compactness,
-            "volume": self.volume, "radius": self.radius if self.radius is not None else float("nan"),
-            "diameter": self.diameter,
-            "axis_distance_x": self.axis_distance_x, "axis_distance_y": self.axis_distance_y,
-            "axis_distance_z": self.axis_distance_z,
-            "bbox_min_x": self.bbox[0], "bbox_max_x": self.bbox[3],
-            "bbox_min_y": self.bbox[1], "bbox_max_y": self.bbox[4],
-            "bbox_min_z": self.bbox[2], "bbox_max_z": self.bbox[5],
-            "bbox_size_x": self.bbox_size_x, "bbox_size_y": self.bbox_size_y,
-            "bbox_size_z": self.bbox_size_z, "bbox_diagonal": self.bbox_diagonal,
-            "bbox_volume": self.bbox_volume, "bbox_aspect_ratio": self.bbox_aspect_ratio,
-            "direction_x": self._direction_component("x"), "direction_y": self._direction_component("y"),
-            "direction_z": self._direction_component("z"),
-            "vertex_count": self.vertex_count, "edge_count": self.edge_count,
-            "wire_count": self.wire_count, "face_count": self.face_count,
-            "shell_count": self.shell_count, "solid_count": self.solid_count,
-            "hole_count": self.hole_count, "adjacent_face_count": self.adjacent_face_count,
-            "vertex_valence": self.vertex_valence,
-        }
-        if name not in values:
-            raise KeyError(name)
-        return float(values[name])
+        if name in ("x", "y", "z"):
+            return float(getattr(self.center, name))
+        if name == "distance":
+            return float(self.distance)
+        if name == "length":
+            return float(self.length)
+        if name == "perimeter":
+            return float(self.perimeter)
+        if name == "area":
+            return float(self.area)
+        if name == "compactness":
+            return float(self.compactness)
+        if name == "volume":
+            return float(self.volume)
+        if name == "radius":
+            return float(self.radius) if self.radius is not None else float("nan")
+        if name == "diameter":
+            return float(self.diameter)
+        if name == "axis_distance_x":
+            return float(self.axis_distance_x)
+        if name == "axis_distance_y":
+            return float(self.axis_distance_y)
+        if name == "axis_distance_z":
+            return float(self.axis_distance_z)
+        if name == "bbox_min_x":
+            return float(self.bbox[0])
+        if name == "bbox_max_x":
+            return float(self.bbox[3])
+        if name == "bbox_min_y":
+            return float(self.bbox[1])
+        if name == "bbox_max_y":
+            return float(self.bbox[4])
+        if name == "bbox_min_z":
+            return float(self.bbox[2])
+        if name == "bbox_max_z":
+            return float(self.bbox[5])
+        if name == "bbox_size_x":
+            return float(self.bbox_size_x)
+        if name == "bbox_size_y":
+            return float(self.bbox_size_y)
+        if name == "bbox_size_z":
+            return float(self.bbox_size_z)
+        if name == "bbox_diagonal":
+            return float(self.bbox_diagonal)
+        if name == "bbox_volume":
+            return float(self.bbox_volume)
+        if name == "bbox_aspect_ratio":
+            return float(self.bbox_aspect_ratio)
+        if name in ("direction_x", "direction_y", "direction_z"):
+            return float(self._direction_component(name[-1]))
+        if name == "vertex_count":
+            return float(self.vertex_count)
+        if name == "edge_count":
+            return float(self.edge_count)
+        if name == "wire_count":
+            return float(self.wire_count)
+        if name == "face_count":
+            return float(self.face_count)
+        if name == "shell_count":
+            return float(self.shell_count)
+        if name == "solid_count":
+            return float(self.solid_count)
+        if name == "hole_count":
+            return float(self.hole_count)
+        if name == "adjacent_face_count":
+            return float(self.adjacent_face_count)
+        if name == "vertex_valence":
+            return float(self.vertex_valence)
+        raise KeyError(name)
 
 
 def _shape_counts(shape: Any) -> tuple[int, int, int, int, int, int]:
@@ -205,38 +416,19 @@ def candidate_for(
     vertex_valences: Optional[dict[str, int]] = None,
     source_bbox: tuple[float, float, float, float, float, float] = (0.0,) * 6,
     edge_convexities_map: Optional[dict[str, str]] = None,
+    shape: Any = None,
 ) -> Candidate:
     ref = make_ref(obj, subname, kind)
-    shape = resolve_ref(obj, ref)
-    vc, ec, wc, fc, shc, soc = _shape_counts(shape)
-    axis_dir, axis_pt = feature_axis_info(obj, shape)
+    if shape is None:
+        shape = resolve_ref(obj, ref)
     return Candidate(
         ref=ref,
-        shape=None,
-        center=feature_center(obj, shape),
-        geom_type=geometry_type(shape),
-        direction=representative_direction(obj, shape, kind),
-        area=feature_area(shape),
-        length=feature_length(shape),
-        perimeter=feature_perimeter(shape),
-        volume=feature_volume(shape),
-        radius=feature_radius(shape),
-        bbox=bbox_tuple(obj, shape),
-        closed=is_closed(shape),
-        valid=is_valid(shape),
-        vertex_count=vc,
-        edge_count=ec,
-        wire_count=wc,
-        face_count=fc,
-        shell_count=shc,
-        solid_count=soc,
-        hole_count=face_hole_count(shape) if kind == "Face" else 0,
+        shape=shape,
+        _obj=obj,
+        source_bbox=source_bbox,
         adjacent_face_count=(edge_adjacent or {}).get(subname, 0) if kind == "Edge" else 0,
         vertex_valence=(vertex_valences or {}).get(subname, 0) if kind == "Vertex" else 0,
-        source_bbox=source_bbox,
         convexity=(edge_convexities_map or {}).get(subname) if kind == "Edge" else None,
-        axis_direction=axis_dir,
-        axis_point=axis_pt,
     )
 
 
@@ -253,7 +445,7 @@ def candidates(obj: Any, kind: str) -> list[Candidate]:
     vertices = adjacent_vertex_counts(obj) if kind == "Vertex" else None
     source_bbox = bbox_tuple(obj, getattr(obj, "Shape", None))
     return [
-        candidate_for(obj, f"{kind}{index}", kind, edges, vertices, source_bbox, conv)
+        candidate_for(obj, f"{kind}{index}", kind, edges, vertices, source_bbox, conv, shape=subfeatures[index - 1])
         for index in range(1, len(subfeatures) + 1)
     ]
 
@@ -548,11 +740,16 @@ class Selector:
     expected_count: Optional[int] = None
     name: str = ""
     version: int = 3
+    expression: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "kind": self.kind, "steps": [s.to_dict() for s in self.steps],
-            "expected_count": self.expected_count, "name": self.name, "version": self.version,
+            "kind": self.kind,
+            "steps": [s.to_dict() for s in self.steps],
+            "expected_count": self.expected_count,
+            "name": self.name,
+            "version": self.version,
+            "expression": self.expression,
         }
 
     def to_json(self) -> str:
@@ -564,24 +761,40 @@ class Selector:
         version = int(data.get("version", 1))
         if version not in {1, 2, 3}:
             raise ValueError(f"Unsupported selector query version {version}")
+        steps = tuple(Step.from_dict(x) for x in data.get("steps", []))
+        kind = str(data["kind"])
+        expr = str(data.get("expression", ""))
         return Selector(
-            kind=str(data["kind"]),
-            steps=tuple(Step.from_dict(x) for x in data.get("steps", [])),
+            kind=kind,
+            steps=steps,
             expected_count=data.get("expected_count"),
             name=str(data.get("name", "")),
             version=3 if version < 3 else version,
+            expression=expr,
         )
 
     def describe(self) -> str:
-        if not self.steps:
-            return f"All {self.kind.lower()}s"
-        return " → ".join([f"All {self.kind.lower()}s"] + [s.label() for s in self.steps])
+        if self.expression:
+            return self.expression
+        if self.steps:
+            from fs_expression import steps_to_expression
+            return steps_to_expression(self.steps, self.kind)
+        return f"All {self.kind.lower()}s"
 
     def evaluate_candidates(self, obj: Any) -> list[Candidate]:
-        current = obj if isinstance(obj, list) else candidates(obj, self.kind)
-        for step in self.steps:
-            current = apply_step(current, step)
-        return current
+        if self.steps:
+            current = obj if isinstance(obj, list) else candidates(obj, self.kind)
+            for step in self.steps:
+                current = apply_step(current, step)
+            return current
+        if self.expression:
+            from fs_expression import evaluate_expression
+            refs = evaluate_expression(obj, self.expression, kind=self.kind)
+            if isinstance(obj, (list, tuple)) and obj:
+                sub_set = {r.subname for r in refs}
+                return [c for c in obj if getattr(getattr(c, "ref", None), "subname", "") in sub_set]
+            return [candidate_for(obj, r.subname, r.kind) for r in refs]
+        return obj if isinstance(obj, list) else candidates(obj, self.kind)
 
     def evaluate(self, obj: Any) -> list[FeatureRef]:
         current = self.evaluate_candidates(obj)

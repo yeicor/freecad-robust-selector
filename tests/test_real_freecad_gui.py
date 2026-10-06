@@ -67,40 +67,31 @@ class TestRealFreeCADGui(unittest.TestCase):
         Gui.Selection.addSelection(box, "Face6")
 
         panel.learn()
-        self._wait_for_planning(panel)
         self.assertEqual(panel.source_obj.Name, "GuiBox")
         self.assertEqual(panel.kind, "Face")
         self.assertEqual(panel.captured_selection, ["Face6"])
+        panel.autocomplete_btn.click()
+        self._wait_for_planning(panel)
         self.assertTrue(len(panel.plans) > 0)
-        self.assertIn("EXACT MATCH", panel.current_result.text())
+        self.assertIn("exact match", panel.current_result.text().lower())
 
-    def test_03_panel_step_editing_and_replan(self):
-        """Verify user can interact with rows: edit, force, add, and replan."""
+    def test_03_panel_cadquery_expression_and_cursor_autocomplete(self):
+        """Verify user can interact with CadQuery expression editor and cursor autocomplete."""
         from fs_gui import FeatureSelectorPanel
         panel = FeatureSelectorPanel.instance()
         panel.show_panel()
-        self._wait_for_planning(panel)
 
-        initial_step_count = len(panel.steps)
-        self.assertTrue(initial_step_count > 0)
+        # Direct expression editing
+        panel.expr_edit.setPlainText(">Z")
+        self.assertIn("Face", panel.current_result.text())
 
-        # Toggle force checkbox on row 0
-        rows = panel._rows()
-        self.assertTrue(len(rows) > 0)
-        first_row = rows[0]
-        first_row.force.setChecked(True)
-        self._wait_for_planning(panel)
-        self.assertTrue(panel.steps[0].forced)
-
-        # Insert a new design intent step
-        panel.insert_btn.click()
-        self.assertEqual(len(panel.steps), initial_step_count + 1)
-
-        # Remove the inserted step
-        last_row = panel._rows()[-1]
-        last_row.remove_btn.click()
-        self._wait_for_planning(panel)
-        self.assertEqual(len(panel.steps), initial_step_count)
+        # Test partial expression and cursor autocomplete
+        panel.expr_edit.setPlainText("faces(\">Z\").edges(")
+        cursor = panel.expr_edit.textCursor()
+        cursor.setPosition(len("faces(\">Z\").edges("))
+        panel.expr_edit.setTextCursor(cursor)
+        panel.autocomplete_btn.click()
+        self.assertTrue(len(panel.expr_edit.toPlainText()) > len("faces(\">Z\").edges("))
 
     def _test_04_panel_create_and_bind_workflow(self):
         """Verify the full Create + Bind workflow through the GUI panel."""
@@ -262,27 +253,18 @@ class TestRealFreeCADGui(unittest.TestCase):
         self.assertEqual(applied, [])
         self.assertEqual(list(panel.plans), before)
 
-    def test_10_alternative_routes_compute_on_expand(self):
-        """Only the best route is eager; alternatives wait for section expand."""
+    def test_10_streamlined_panel_ui_no_accordions(self):
+        """Accordions are removed to simplify the UI; standard dialog buttons are available."""
         from fs_gui import FeatureSelectorPanel
         panel = FeatureSelectorPanel.instance()
         panel.show_panel()
-        box = self.doc.addObject("Part::Box", "LazyBox")
-        box.Length, box.Width, box.Height = 30.0, 30.0, 10.0
-        self.doc.recompute()
-        Gui.Selection.clearSelection()
-        Gui.Selection.addSelection(box, "Face6")
-        panel.learn()
-        self._wait_for_planning(panel)
-        self.assertEqual(len(panel.plans), 1)
-        self.assertFalse(panel._routes_complete)
-        steps_before = list(panel.steps)
-        panel.routes_section.expand()
-        self._wait_for_planning(panel)
-        self.assertTrue(panel._routes_complete)
-        self.assertTrue(len(panel.plans) >= 1)
-        self.assertIn(str(len(panel.plans)), panel.routes_section._title)
-        self.assertEqual(list(panel.steps), steps_before)
+        # Verify obsolete accordion sections are completely removed from panel
+        self.assertFalse(hasattr(panel, "routes_section"))
+        self.assertFalse(hasattr(panel, "candidates_section"))
+        self.assertFalse(hasattr(panel, "advanced_section"))
+        # Verify standard FreeCAD dialog buttons and window title are registered
+        self.assertTrue(panel.getStandardButtons() > 0)
+        self.assertEqual(panel.getTitle(), "Feature Selector")
 
     def test_11_learn_refuses_foreign_document_geometry(self):
         """Capturing geometry from another document is refused with guidance."""

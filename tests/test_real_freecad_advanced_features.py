@@ -127,49 +127,35 @@ class TestRealFreeCADAdvancedFeatures(unittest.TestCase):
         Gui.Selection.addSelection(fillet2)  # Whole consumer feature selected
 
         panel.learn()
-        self._wait_for_planning(panel)
         self.assertEqual(panel.source_obj.Name, "BoxFillet")
         self.assertEqual(panel.kind, "Edge")
         self.assertTrue(len(panel.target_subnames) > 0)
-        self.assertIn("EXACT MATCH", panel.current_result.text())
+        panel.autocomplete_btn.click()
+        self._wait_for_planning(panel)
+        self.assertIn("Edge", panel.current_result.text())
+        self.assertIn("2 target", panel.current_result.text())
 
-    def test_04_candidate_inspector_table_metrics(self):
-        """Verify candidate table displays subelements, status, and geometric metrics."""
+    def test_04_cadquery_expression_evaluation(self):
+        """Verify CadQuery expression evaluation and real-time result feedback."""
         panel = FeatureSelectorPanel.instance()
-        # With BoxFillet and Edge selected from previous test:
-        self.assertTrue(panel.candidate_table.rowCount() >= 2)
-
-        # Check row 0 contents
-        subname = panel.candidate_table.item(0, 0).text()
-        status = panel.candidate_table.item(0, 1).text()
-        metric = panel.candidate_table.item(0, 2).text()
-        center = panel.candidate_table.item(0, 3).text()
-
-        self.assertTrue(subname.startswith("Edge"))
-        self.assertEqual(status, "✓ Exact")
-        self.assertIn("mm", metric)  # Curve (XX mm)
-        self.assertTrue(center.startswith("(") and center.endswith(")"))
-
-        # Test selecting a row in candidate table (triggers 3D highlight)
-        panel.candidate_table.selectRow(0)
-        panel._candidate_row_selected()
-        current_sel = Gui.Selection.getSelectionEx()
-        self.assertTrue(len(current_sel) > 0)
-        self.assertEqual(current_sel[0].SubElementNames, (subname,))
+        # Set CadQuery expression directly into the expression editor
+        panel.expr_edit.setPlainText("|Z")
+        self.assertTrue(len(panel.last_resolved) >= 2)
+        self.assertIn("Edge", panel.current_result.text())
+        self.assertIn("ms", panel.current_result.text())
 
     def test_05_presets_combo_insertion(self):
-        """Verify selecting a preset inserts that design intent step and replans."""
+        """Verify selecting a preset inserts that snippet into the expression editor."""
         panel = FeatureSelectorPanel.instance()
-        initial_step_count = len(panel.steps)
+        panel.expr_edit.clear()
 
-        # Select a vertical edge preset: "All Vertical Edges (|| Z)"
+        # Select a vertical edge preset: "Vertical (|Z)"
         vert_idx = next(i for i, (label, _) in enumerate(PRESETS) if "Vertical" in label)
         panel.preset_combo.setCurrentIndex(vert_idx)
-        self._wait_for_planning(panel)
 
-        # Steps count should have updated
-        self.assertTrue(len(panel.steps) >= initial_step_count)
-        self.assertTrue(any(s.forced for s in panel.steps))
+        # Expression editor should contain the snippet and evaluate it
+        self.assertIn("|Z", panel.expr_edit.toPlainText())
+        self.assertTrue(len(panel.last_resolved) >= 2)
 
     def test_06_live_3d_preview_toggle(self):
         """Verify toggling live 3D preview updates FreeCAD selection highlights."""
@@ -180,6 +166,7 @@ class TestRealFreeCADAdvancedFeatures(unittest.TestCase):
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(box_prev, "Edge1")
         panel.learn()
+        panel.autocomplete_btn.click()
         self._wait_for_planning(panel)
 
         self.assertTrue(panel.live_preview_cb.isChecked())

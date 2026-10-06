@@ -476,6 +476,62 @@ def _pool_and_target_keys(
     return pool, target_keys
 
 
+def _fast_exact_plans(pool: list[Candidate], target_keys: set[tuple[str, str]], kind: str, max_results: int) -> list[Plan]:
+    found: list[Plan] = []
+    seen_keys = set()
+
+    candidate_steps: list[tuple[Step, str]] = []
+    for metric, axis in (("z", "Z"), ("y", "Y"), ("x", "X")):
+        candidate_steps.append((Step("extreme", {"metric": metric, "direction": "max", "tolerance": 1e-4}), f">{axis}"))
+        candidate_steps.append((Step("extreme", {"metric": metric, "direction": "min", "tolerance": 1e-4}), f"<{axis}"))
+    for axis in ("Z", "Y", "X"):
+        candidate_steps.append((Step("filter", {"name": "axis_parallel", "value": axis}), f"|{axis}"))
+        candidate_steps.append((Step("filter", {"name": "axis_perpendicular", "value": axis}), f"#{axis}"))
+    for gt in ("PLANE", "CYLINDER", "CONE", "SPHERE", "LINE", "CIRCLE"):
+        candidate_steps.append((Step("filter", {"name": "geom_type", "value": gt}), f"%{gt.capitalize()}"))
+
+    # Test 1-step candidates
+    for step, expr in candidate_steps:
+        try:
+            trial = apply_step(pool, step)
+            if _same_target(trial, target_keys):
+                sig = _step_key(step)
+                if sig not in seen_keys:
+                    seen_keys.add(sig)
+                    sel = Selector(kind, (step,), len(target_keys), "planned", expression=expr)
+                    found.append(Plan(sel, _plan_score([step]), expr))
+                    if len(found) >= max_results:
+                        return found
+        except Exception:
+            continue
+
+    # Test 2-step combinations
+    if not found:
+        for step1, expr1 in candidate_steps[:6]:
+            try:
+                trial1 = apply_step(pool, step1)
+                if not trial1 or not _contains_target(trial1, target_keys):
+                    continue
+                for step2, expr2 in candidate_steps:
+                    try:
+                        trial2 = apply_step(trial1, step2)
+                        if _same_target(trial2, target_keys):
+                            sig = (_step_key(step1), _step_key(step2))
+                            if sig not in seen_keys:
+                                seen_keys.add(sig)
+                                combined_expr = f"{expr1} and {expr2}"
+                                sel = Selector(kind, (step1, step2), len(target_keys), "planned", expression=combined_expr)
+                                found.append(Plan(sel, _plan_score([step1, step2]), combined_expr))
+                                if len(found) >= max_results:
+                                    return found
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+    return found
+
+
 def plan_selectors(
     obj: Any,
     kind: str,
@@ -496,6 +552,13 @@ def plan_selectors(
         required = tuple(step for step in required_steps if step.forced)
         if required:
             positions = {index: step for index, step in enumerate(required)}
+
+    # Fast path for unconstrained single or two-step exact plans
+    if not positions:
+        fast = _fast_exact_plans(pool, target_keys, kind, max_results)
+        if fast:
+            return fast
+
     return _search(
         pool,
         target_keys,
