@@ -15,9 +15,10 @@ except NameError:
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-Gui.addIconPath(os.path.join(_ROOT, "icons"))
+if hasattr(Gui, "addIconPath"):
+    Gui.addIconPath(os.path.join(_ROOT, "icons"))
 
-from fs_commands import CONTEXT_COMMANDS, MENU_COMMANDS, TOOLBAR_COMMANDS, register_commands
+from fs_commands import register_commands
 
 
 class RobustSelectorWorkbench(Gui.Workbench):
@@ -28,10 +29,27 @@ class RobustSelectorWorkbench(Gui.Workbench):
     Icon = "FeatureSelector.svg"
 
     def Initialize(self):
+        # NOTE: FreeCAD executes InitGui.py in the shared __main__ namespace,
+        # whose globals may be cleared or reused by the time the user first
+        # activates the workbench. That used to break activation with
+        # "NameError: name 'register_commands' is not defined". Import locally
+        # so activation never depends on InitGui module globals surviving.
+        # The instance itself is kept alive by FreeCAD, so an instance-level
+        # guard is safe against double initialization.
+        if getattr(self, "_initialized", False):
+            return
+        from fs_commands import (
+            CONTEXT_COMMANDS,
+            MENU_COMMANDS,
+            TOOLBAR_COMMANDS,
+            register_commands,
+        )
+
         self._commands = register_commands()
         self.appendToolbar("Robust Selection", TOOLBAR_COMMANDS)
         self.appendMenu(["Robust Selection"], MENU_COMMANDS)
         self.appendContextMenu("Robust Selection", CONTEXT_COMMANDS)
+        self._initialized = True
 
     def Activated(self):
         pass
