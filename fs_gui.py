@@ -1093,10 +1093,15 @@ class FeatureSelectorPanel:
             self.active_plan_index = -1
             self._mark_routes_stale()
             self._render_routes()
-
+            self._render_rows()
             self._set_source_label()
             self._update_editor_result()
             self.save_btn.setText("Save Changes")
+            if hasattr(source, "ViewObject") and source.ViewObject is not None:
+                source.ViewObject.Visibility = True
+            refs = selector.evaluate(source)
+            if refs:
+                add_selection(refs, clear=True)
         except Exception as exc:
             _notify_user(Gui.getMainWindow(), "Feature Selector", f"Could not open selector: {exc}", "warning")
             self.status.setText(f"Could not open selector: {exc}")
