@@ -286,6 +286,42 @@ class TestRealFreeCADGui(unittest.TestCase):
         finally:
             App.closeDocument(foreign.Name)
 
+    def test_12_define_selector_first_and_use_as_target(self):
+        """Verify defining a selector first and adopting its results as the target."""
+        from fs_gui import FeatureSelectorPanel
+        panel = FeatureSelectorPanel.instance()
+        panel.show_panel()
+
+        box = self.doc.addObject("Part::Box", "ReverseTargetBox")
+        box.Length, box.Width, box.Height = 30.0, 30.0, 30.0
+        self.doc.recompute()
+
+        # User selects only the object (e.g. from tree view or 3D view), no subelements
+        panel.source_obj = box
+        panel.target_subnames = []
+        panel.kind = None
+        panel.expr_edit.setPlainText('faces(">Z").edges()')
+
+        # Before setting as target: 4 edges evaluated, but no target set
+        self.assertEqual(len(panel.target_subnames), 0)
+        self.assertEqual(len(panel.last_resolved), 4)
+        self.assertIn("Found 4 Edge(s)", panel.current_result.text())
+
+        # Click Set as Target button
+        panel.set_target_btn.click()
+
+        # Target should now be adopted and be an exact match
+        self.assertEqual(len(panel.target_subnames), 4)
+        self.assertEqual(panel.kind, "Edge")
+        self.assertIn("exact match", panel.current_result.text().lower())
+        self.assertEqual(len(panel.plans), 1)
+
+        # OK / accept saves the selector with the adopted targets
+        selector = panel._exact_selector()
+        self.assertIsNotNone(selector)
+        self.assertEqual(selector.expected_count, 4)
+        self.assertEqual(selector.expression, 'faces(">Z").edges()')
+
 
     def _test_06_streamlined_panel_ux(self):
         """Verify progressive disclosure, help guide, dynamic bind button, and no-target fallback."""

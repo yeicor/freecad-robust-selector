@@ -215,13 +215,19 @@ class FeatureSelectorPanel:
         self.title_label.setStyleSheet("font-size: 13px; padding-bottom: 2px;")
         layout.addWidget(self.title_label)
 
-        # ── Row 1: Target feature(s) and [Change] button ──
+        # ── Row 1: Target feature(s) and [Set as Target] & [Change] buttons ──
         target_row = QtWidgets.QHBoxLayout()
         target_row.setSpacing(4)
         self.target_label = QtWidgets.QLabel("Target: — (select in 3D view)")
         self.target_label.setWordWrap(True)
         self.target_label.setStyleSheet("font-weight: bold; padding: 2px;")
         target_row.addWidget(self.target_label, 1)
+
+        self.set_target_btn = QtWidgets.QPushButton("Set as Target")
+        self.set_target_btn.setToolTip("Set the current selector result as the new target (exact match).")
+        self.set_target_btn.clicked.connect(self.set_target_from_selector)
+        self.use_as_target_btn = self.set_target_btn
+        target_row.addWidget(self.set_target_btn)
 
         self.change_btn = QtWidgets.QPushButton("Change")
         self.change_btn.setToolTip("Capture the current FreeCAD 3D selection as the target.")
@@ -598,25 +604,117 @@ class FeatureSelectorPanel:
             self.expr_edit.setTextCursor(cursor)
             self.expr_edit.setFocus()
 
+    def set_target_from_selector(self):
+        """Adopt the current selector's evaluated features as the new target."""
+        if not self.source_obj:
+            sources, object_only = _selection_snapshot()
+            if sources:
+                self.source_obj = sources[0][0]
+                if not self.kind:
+                    self.kind = sources[0][2]
+            elif object_only:
+                self.source_obj = object_only[0]
+            elif App and getattr(App, "ActiveDocument", None):
+                active = getattr(App.ActiveDocument, "ActiveObject", None)
+                if active and hasattr(active, "Shape"):
+                    self.source_obj = active
+
+        if not self.source_obj:
+            _notify_user(
+                Gui.getMainWindow() if Gui else None,
+                "Feature Selector",
+                "Please select an object first so the selector can evaluate its features.",
+                "info",
+            )
+            return
+
+        expr = self.expr_edit.toPlainText().strip()
+        if not expr:
+            _notify_user(
+                Gui.getMainWindow() if Gui else None,
+                "Feature Selector",
+                "Enter a selector expression first (e.g. >Z, |Z, faces('>Z').edges()).",
+                "info",
+            )
+            return
+
+        try:
+            matched_items = evaluate_expression_items(self.source_obj, expr, kind=self.kind)
+        except Exception as exc:
+            _notify_user(
+                Gui.getMainWindow() if Gui else None,
+                "Feature Selector",
+                f"Cannot evaluate selector: {exc}",
+                "warning",
+            )
+            return
+
+        if not matched_items:
+            _notify_user(
+                Gui.getMainWindow() if Gui else None,
+                "Feature Selector",
+                "Current selector matches 0 features. Cannot use empty selection as target.",
+                "warning",
+            )
+            return
+
+        resolved_names = [item.subname for item in matched_items if getattr(item, "subname", "")]
+        inferred_kind = matched_items[0].kind if matched_items else (self.kind or "Face")
+        self.kind = inferred_kind
+        self.target_subnames = list(resolved_names)
+        self.captured_selection = list(resolved_names)
+        self.selector_obj = None
+        self._update_merged_status()
+
+    def use_as_target(self):
+        """Alias for set_target_from_selector."""
+        self.set_target_from_selector()
+
     def _update_merged_status(self):
-        if not self.source_obj or not self.kind or not self.target_subnames:
+        if not self.source_obj:
+            sources, object_only = _selection_snapshot()
+            if sources:
+                self.source_obj = sources[0][0]
+                if not self.kind:
+                    self.kind = sources[0][2]
+                if not self.target_subnames:
+                    self.target_subnames = _distinct([name for _obj, names, _kind in sources for name in names])
+                    self.captured_selection = list(self.target_subnames)
+            elif object_only:
+                self.source_obj = object_only[0]
+            elif App and getattr(App, "ActiveDocument", None):
+                active = getattr(App.ActiveDocument, "ActiveObject", None)
+                if active and hasattr(active, "Shape"):
+                    self.source_obj = active
+
+        if not self.source_obj:
             self.target_label.setText("Target: — (select in 3D view and click Change)")
             self.current_result.setText("Result: —")
             self.current_result.setStyleSheet("color: palette(mid);")
+            if hasattr(self, "set_target_btn"):
+                self.set_target_btn.setEnabled(False)
             return
 
         obj_label = getattr(self.source_obj, "Label", getattr(self.source_obj, "Name", "Object"))
-        count = len(self.target_subnames)
-        names = ", ".join(self.target_subnames[:4])
-        if count > 4:
-            names += f" +{count - 4} more"
-        self.target_label.setText(f"Target: {obj_label} [{names}]")
+        count = len(self.target_subnames) if self.target_subnames else 0
+        if self.target_subnames:
+            names = ", ".join(self.target_subnames[:4])
+            if count > 4:
+                names += f" +{count - 4} more"
+            self.target_label.setText(f"Target: {obj_label} [{names}]")
+        else:
+            self.target_label.setText(f"Target: {obj_label} (no target set)")
 
         expr = self.expr_edit.toPlainText().strip()
         if not expr:
             self.last_resolved = []
-            self.current_result.setText(f"Waiting for selector ({count} {self.kind} target)")
+            if count > 0:
+                self.current_result.setText(f"Waiting for selector ({count} {self.kind or 'feature'} target)")
+            else:
+                self.current_result.setText("Enter selector expression or select in 3D view")
             self.current_result.setStyleSheet("color: palette(mid);")
+            if hasattr(self, "set_target_btn"):
+                self.set_target_btn.setEnabled(False)
             return
 
         t0 = time.perf_counter()
@@ -625,29 +723,40 @@ class FeatureSelectorPanel:
             self.last_resolved = matched_items
             t_ms = (time.perf_counter() - t0) * 1000.0
             matched_names = {item.subname for item in matched_items}
-            target_set = set(self.target_subnames)
             m_count = len(matched_items)
+            res_kind = matched_items[0].kind if matched_items else (self.kind or "Feature")
 
-            if matched_names == target_set:
-                self.current_result.setText(f"✓ {m_count} {self.kind}(s) (Exact match) · {t_ms:.1f}ms")
-                self.current_result.setStyleSheet("font-weight: bold; color: #44cc44;")
-                exact_sel = Selector(
-                    kind=self.kind,
-                    steps=tuple(self.steps),
-                    expected_count=len(self.target_subnames),
-                    name="interactive",
-                    expression=expr,
-                )
-                self.plans = [Plan(selector=exact_sel, score=(1, 0, 0), explanation="Exact match")]
+            if hasattr(self, "set_target_btn"):
+                self.set_target_btn.setEnabled(m_count > 0)
+
+            if self.target_subnames:
+                target_set = set(self.target_subnames)
+                if matched_names == target_set:
+                    self.current_result.setText(f"✓ {m_count} {self.kind or res_kind}(s) (Exact match) · {t_ms:.1f}ms")
+                    self.current_result.setStyleSheet("font-weight: bold; color: #44cc44;")
+                    exact_sel = Selector(
+                        kind=self.kind or res_kind,
+                        steps=tuple(self.steps),
+                        expected_count=len(self.target_subnames),
+                        name="interactive",
+                        expression=expr,
+                    )
+                    self.plans = [Plan(selector=exact_sel, score=(1, 0, 0), explanation="Exact match")]
+                else:
+                    self.plans = []
+                    self.current_result.setText(f"⚠ {m_count} {self.kind or res_kind}(s) (not exact, {count} target) · {t_ms:.1f}ms")
+                    self.current_result.setStyleSheet("font-weight: bold; color: #ccaa44;")
             else:
                 self.plans = []
-                self.current_result.setText(f"⚠ {m_count} {self.kind}(s) (not exact, {count} target) · {t_ms:.1f}ms")
-                self.current_result.setStyleSheet("font-weight: bold; color: #ccaa44;")
+                self.current_result.setText(f"Found {m_count} {res_kind}(s) · {t_ms:.1f}ms (click Set as Target)")
+                self.current_result.setStyleSheet("font-weight: bold; color: #44aacc;")
 
             if self.live_preview_cb.isChecked():
                 self._update_3d_preview([item.shape for item in matched_items])
         except Exception as exc:
             self.last_resolved = []
+            if hasattr(self, "set_target_btn"):
+                self.set_target_btn.setEnabled(False)
             t_ms = (time.perf_counter() - t0) * 1000.0
             self.current_result.setText(f"❌ Syntax/Evaluation: {exc} · {t_ms:.1f}ms")
             self.current_result.setStyleSheet("font-weight: bold; color: #cc4444;")
