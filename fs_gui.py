@@ -26,10 +26,15 @@ from fs_bindings import (
 from fs_document import create_selector_object, ensure_selector_properties
 from fs_expression import (
     autocomplete_at_cursor,
+    compute_synchronized_colors,
+    decompose_clauses,
     evaluate_expression,
     evaluate_expression_items,
     parse_expression,
     steps_to_expression,
+    ExpressionClause,
+    SYNCHRONIZED_PALETTE,
+    OVERLAP_COLOR,
 )
 from fs_freecad import add_selection, shape_type_from_subname
 from fs_planner import Plan, plan_selectors
@@ -139,14 +144,35 @@ PRESETS: list[tuple[str, str]] = [
 
 
 class ExpressionHighlighter(QtGui.QSyntaxHighlighter):
-    """Real-time syntax highlighter for CadQuery selector expressions."""
+    """Synchronized syntax highlighter mapping expression clauses 1:1 to 3D geometry features."""
 
     def __init__(self, parent: QtGui.QTextDocument):
         super().__init__(parent)
+        self._clauses: list[ExpressionClause] = []
+        self._active_clause_idx: Optional[int] = None
         self._rules: list[tuple[QtCore.QRegularExpression, QtGui.QTextCharFormat]] = []
-        self._init_rules()
+        self._init_fallback_rules()
 
-    def _init_rules(self):
+    def set_synchronized_clauses(self, clauses: list[ExpressionClause], active_idx: Optional[int] = None):
+        """Update clause spans and active clause, re-evaluating syntax highlights."""
+        same_clauses = len(self._clauses) == len(clauses) and all(
+            c1.text == c2.text and c1.start_pos == c2.start_pos and c1.end_pos == c2.end_pos and c1.color_index == c2.color_index
+            for c1, c2 in zip(self._clauses, clauses)
+        )
+        if same_clauses and self._active_clause_idx == active_idx:
+            return
+        self._clauses = list(clauses)
+        self._active_clause_idx = active_idx
+        self.rehighlight()
+
+    def set_active_clause(self, active_idx: Optional[int]):
+        """Update active focused clause index and refresh highlighting."""
+        if self._active_clause_idx == active_idx:
+            return
+        self._active_clause_idx = active_idx
+        self.rehighlight()
+
+    def _init_fallback_rules(self):
         def _fmt(color: str, bold: bool = False, italic: bool = False) -> QtGui.QTextCharFormat:
             f = QtGui.QTextCharFormat()
             f.setForeground(QtGui.QColor(color))
@@ -156,36 +182,58 @@ class ExpressionHighlighter(QtGui.QSyntaxHighlighter):
                 f.setFontItalic(True)
             return f
 
-        # Methods / kinds: faces, edges, vertices, wires, solids
         self._rules.append((QtCore.QRegularExpression(r"\b(faces|edges|vertices|wires|solids)\b"), _fmt("#0277bd", bold=True)))
-
-        # Relational combinators: adjacent_to, coplanar_to, coaxial_to
         self._rules.append((QtCore.QRegularExpression(r"\b(adjacent_to|coplanar_to|coaxial_to)\b"), _fmt("#00838f", bold=True)))
-
-        # Tags: :concave, :convex, :smooth, :closed, :boundary, :hole, :planar, etc.
         self._rules.append((QtCore.QRegularExpression(r":[A-Za-z_][A-Za-z0-9_]*"), _fmt("#2e7d32", bold=True)))
-
-        # Canonical Clusters & Extrema: >>Z, <<Z, >>radius[0], <<length[0:2], >Z, <Z, |Z, #Z, +Z, -Z, %Type
+        self._rules.append((QtCore.QRegularExpression(r"=[A-Za-z0-9_][A-Za-z0-9_.]*"), _fmt("#00838f", bold=True)))
         self._rules.append((QtCore.QRegularExpression(r"(>>|<<)[A-Za-z0-9_]+(\[[^\]]*\])?"), _fmt("#6a1b9a", bold=True)))
         self._rules.append((QtCore.QRegularExpression(r"[><|#\+\-][XYZxyz]"), _fmt("#7b1fa2", bold=True)))
         self._rules.append((QtCore.QRegularExpression(r"%[A-Za-z]+"), _fmt("#ad1457", bold=True)))
-
-        # Logical operators: and, or, not, exc, in
         self._rules.append((QtCore.QRegularExpression(r"\b(and|or|not|exc|in)\b"), _fmt("#c2185b", bold=True)))
-
-        # Metrics: radius, length, area, volume, distance, perimeter, x, y, z
         self._rules.append((QtCore.QRegularExpression(r"\b(radius|rad|length|len|area|volume|vol|distance|dist|perimeter|perim|diameter|[xyzXYZ])\b"), _fmt("#1565c0")))
-
-        # Comparisons: ==, !=, <=, >=, <, >
         self._rules.append((QtCore.QRegularExpression(r"(==|!=|<=|>=|<|>)"), _fmt("#e65100", bold=True)))
-
-        # Numbers
         self._rules.append((QtCore.QRegularExpression(r"\b[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?\b"), _fmt("#ef6c00")))
-
-        # Quoted strings
         self._rules.append((QtCore.QRegularExpression(r"\"[^\"]*\"|'[^']*'"), _fmt("#558b2f", italic=True)))
 
     def highlightBlock(self, text: str):
+        if not text:
+            return
+
+        # Synchronized 1:1 clause-to-3D highlighting
+        if self._clauses:
+            m_wrap = re.match(r"^([A-Za-z_][A-Za-z0-9_]*\s*\(\s*[\"'])(.*)([\"']\s*\))$", text, re.DOTALL)
+            if m_wrap:
+                p_len = len(m_wrap.group(1))
+                s_start = len(text) - len(m_wrap.group(3))
+                f_dim = QtGui.QTextCharFormat()
+                f_dim.setForeground(QtGui.QColor("#78909c"))
+                self.setFormat(0, p_len, f_dim)
+                self.setFormat(s_start, len(m_wrap.group(3)), f_dim)
+
+            for idx, c in enumerate(self._clauses):
+                start = c.start_pos
+                length = c.end_pos - c.start_pos
+                if start < 0 or start + length > len(text):
+                    continue
+
+                pal = SYNCHRONIZED_PALETTE[c.color_index % len(SYNCHRONIZED_PALETTE)]
+                fmt = QtGui.QTextCharFormat()
+                fmt.setForeground(QtGui.QColor(pal["text_dark"]))
+
+                is_active = (self._active_clause_idx == idx)
+                bg_color = QtGui.QColor(pal["hex"])
+                bg_color.setAlpha(65 if is_active else 28)
+                fmt.setBackground(QtGui.QBrush(bg_color))
+
+                fmt.setFontUnderline(True)
+                fmt.setUnderlineColor(QtGui.QColor(pal["border_editor"]))
+                if is_active:
+                    fmt.setFontWeight(QtGui.QFont.Weight.Bold)
+
+                self.setFormat(start, length, fmt)
+            return
+
+        # Fallback rule-based highlighting
         for pattern, fmt in self._rules:
             match_iter = pattern.globalMatch(text)
             while match_iter.hasNext():
@@ -218,6 +266,8 @@ class ExpressionEditor(QtWidgets.QPlainTextEdit):
         'adjacent_to("', 'coplanar_to("', 'coaxial_to("',
         # Logic Keywords
         'and', 'or', 'not', 'exc', 'in',
+        # Parametric Expressions
+        '=VarSet.', '=Spreadsheet.',
     ]
 
     def __init__(self, panel: Optional[Any] = None, parent: Optional[QtWidgets.QWidget] = None):
@@ -226,6 +276,26 @@ class ExpressionEditor(QtWidgets.QPlainTextEdit):
         self.highlighter = ExpressionHighlighter(self.document())
         self._completer = None
         self._init_completer()
+        self.cursorPositionChanged.connect(self._on_cursor_position_changed)
+
+    def _on_cursor_position_changed(self):
+        if getattr(self, "_updating_cursor", False):
+            return
+        self._updating_cursor = True
+        try:
+            pos = self.textCursor().position()
+            clauses = getattr(self.highlighter, "_clauses", [])
+            active_idx = None
+            for idx, c in enumerate(clauses):
+                if c.start_pos <= pos <= c.end_pos:
+                    active_idx = idx
+                    break
+            if self.highlighter._active_clause_idx != active_idx:
+                self.highlighter.set_active_clause(active_idx)
+                if self.panel and hasattr(self.panel, "_on_active_clause_changed"):
+                    self.panel._on_active_clause_changed(active_idx)
+        finally:
+            self._updating_cursor = False
 
     def _init_completer(self):
         try:
@@ -1227,11 +1297,17 @@ class FeatureSelectorPanel:
             self.current_result.setStyleSheet("font-weight: bold; color: #c62828; background-color: rgba(198, 40, 40, 0.12); border-radius: 3px; padding: 2px 6px;")
             self.current_result.setToolTip("")
 
+    def _on_active_clause_changed(self, active_idx: Optional[int]):
+        """Focus 3D elements belonging to the active clause under cursor."""
+        if not self.live_preview_cb.isChecked() or not self.source_obj:
+            return
+        self._update_3d_preview(active_clause_idx=active_idx)
+
     def _toggle_live_preview(self, checked: bool):
         if checked:
             self._update_merged_status()
         else:
-            self._clear_3color_highlighting()
+            self._clear_synchronized_highlighting()
             self._clear_3d_direction_indicator()
             try:
                 if Gui is not None:
@@ -1239,29 +1315,28 @@ class FeatureSelectorPanel:
             except Exception:
                 pass
 
-    def _apply_3color_highlighting(self, matched_names: set[str], intended_names: set[str]):
-        """VIS-1: Three-color intent highlighting in FreeCAD 3D viewport."""
+    def _apply_synchronized_highlighting(
+        self,
+        element_colors: dict[str, tuple[float, float, float, float]],
+        missing_names: Optional[set[str]] = None,
+    ):
+        """Synchronize 3D geometry element colors with selector expression clauses."""
         if not self.source_obj or not hasattr(self.source_obj, "ViewObject"):
             return
         vo = self.source_obj.ViewObject
         if vo is None or not hasattr(vo, "setElementColors"):
             return
-        colors = {}
-        # Green: Intended & Matched
-        for n in (matched_names & intended_names):
-            colors[n] = (0.18, 0.80, 0.44, 0.0)
-        # Amber: Extra / Over-selected
-        for n in (matched_names - intended_names):
-            colors[n] = (0.95, 0.61, 0.07, 0.0)
-        # Red: Missing / Under-selected
-        for n in (intended_names - matched_names):
-            colors[n] = (0.91, 0.30, 0.24, 0.0)
+        colors = dict(element_colors)
+        if missing_names:
+            for n in missing_names:
+                if n not in colors:
+                    colors[n] = (0.91, 0.30, 0.24, 0.0)
         try:
             vo.setElementColors(colors)
         except Exception:
             pass
 
-    def _clear_3color_highlighting(self):
+    def _clear_synchronized_highlighting(self):
         if self.source_obj and hasattr(self.source_obj, "ViewObject"):
             vo = self.source_obj.ViewObject
             if vo and hasattr(vo, "setElementColors"):
@@ -1269,6 +1344,9 @@ class FeatureSelectorPanel:
                     vo.setElementColors({})
                 except Exception:
                     pass
+
+    # Clean alias
+    _clear_3color_highlighting = _clear_synchronized_highlighting
 
     def _update_3d_direction_indicator(self, expr: str, matched_items: Sequence[Any]):
         """VIS-3: Display a subtle 3D direction indicator on the centroid of matched elements in the viewport."""
@@ -1320,22 +1398,38 @@ class FeatureSelectorPanel:
                 except Exception:
                     pass
 
-    def _update_3d_preview(self, shapes: Optional[list[Any]] = None):
+    def _update_3d_preview(self, shapes: Optional[list[Any]] = None, active_clause_idx: Optional[int] = None):
         if not self.live_preview_cb.isChecked() or not self.source_obj:
             return
+        if getattr(self, "_preview_updating", False):
+            return
+        self._preview_updating = True
         try:
             expr = self.expr_edit.toPlainText().strip()
             if expr:
                 tol = getattr(self, "tolerance", 1e-4)
+                if active_clause_idx is None and hasattr(self.expr_edit, "highlighter"):
+                    active_clause_idx = getattr(self.expr_edit.highlighter, "_active_clause_idx", None)
+                clauses, element_colors = compute_synchronized_colors(
+                    self.source_obj, expr, kind=self.kind, tolerance=tol, active_clause_idx=active_clause_idx
+                )
+                if hasattr(self.expr_edit, "highlighter"):
+                    self.expr_edit.highlighter.set_synchronized_clauses(clauses, active_clause_idx)
+
                 refs = evaluate_expression(self.source_obj, expr, kind=self.kind, tolerance=tol)
                 if refs:
                     add_selection(refs, clear=True)
                 matched_names = {r.subname for r in refs}
                 intended_names = set(self.captured_selection or self.target_subnames or [])
-                self._apply_3color_highlighting(matched_names, intended_names)
+                missing_names = intended_names - matched_names
+                self._apply_synchronized_highlighting(element_colors, missing_names)
                 self._update_3d_direction_indicator(expr, getattr(self, "last_resolved", []))
+            else:
+                self._clear_synchronized_highlighting()
         except Exception:
             pass
+        finally:
+            self._preview_updating = False
 
     def _exact_selector(self) -> Optional[Selector]:
         if not self.source_obj or not self.kind:

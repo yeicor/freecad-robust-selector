@@ -6,14 +6,118 @@ expanded to support component descending and cursor-based autocompletion.
 """
 from __future__ import annotations
 
+import ast
 import math
 import re
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional, Sequence, Union
+
+try:
+    import FreeCAD as App
+except ImportError:
+    App = None
 
 from fs_freecad import FeatureRef, shape_type_from_subname
 from fs_selector import GeometryItem, candidates, candidate_for
 
 EvaluatorItem = GeometryItem
+
+
+def evaluate_scalar_value(val: Any, obj: Any = None, tolerance: float = 1e-4) -> float:
+    """Evaluate a numeric scalar literal or FreeCAD parametric expression.
+
+    Supports:
+      - Numeric types: int, float, Base.Quantity
+      - Numeric literal strings: "5.0", "-12.3", "10"
+      - FreeCAD expressions with leading '=': "=VarSet.param", "=Spreadsheet.B2", "=Pad.Length / 2"
+      - Bare dotted FreeCAD identifiers: "VarSet.HoleRadius", "Spreadsheet.drill_dia"
+      - Unit arithmetic expressions: "=10mm + 2mm", "=VarSet.r * 2"
+    """
+    if isinstance(val, (int, float)):
+        return float(val)
+    if hasattr(val, "Value"):
+        return float(val.Value)
+
+    val_str = str(val).strip()
+    if not val_str:
+        return 0.0
+
+    clean_val = val_str.lstrip("=")
+    try:
+        return float(clean_val)
+    except ValueError:
+        pass
+
+    eval_target = None
+    if obj is not None:
+        if hasattr(obj, "evalExpression"):
+            eval_target = obj
+        elif hasattr(obj, "Document") and obj.Document:
+            eval_target = next((o for o in obj.Document.Objects if hasattr(o, "evalExpression")), None)
+
+    if eval_target is None and App is not None and getattr(App, "ActiveDocument", None):
+        eval_target = next((o for o in App.ActiveDocument.Objects if hasattr(o, "evalExpression")), None)
+
+    if eval_target is not None:
+        try:
+            res = eval_target.evalExpression(clean_val)
+            if hasattr(res, "Value"):
+                return float(res.Value)
+            return float(res)
+        except Exception:
+            pass
+
+    try:
+        node = ast.parse(clean_val, mode="eval")
+
+        def _eval_node(n):
+            if isinstance(n, ast.Expression):
+                return _eval_node(n.body)
+            if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+                return float(n.value)
+            if isinstance(n, ast.Name):
+                if eval_target and hasattr(eval_target, "evalExpression"):
+                    try:
+                        res = eval_target.evalExpression(n.id)
+                        return float(getattr(res, "Value", res))
+                    except Exception:
+                        pass
+                if obj and hasattr(obj, n.id):
+                    v = getattr(obj, n.id)
+                    return float(getattr(v, "Value", v))
+            if isinstance(n, ast.Attribute):
+                attr_expr = ast.unparse(n) if hasattr(ast, "unparse") else f"{getattr(n.value, 'id', '')}.{n.attr}"
+                if eval_target and hasattr(eval_target, "evalExpression"):
+                    try:
+                        res = eval_target.evalExpression(attr_expr)
+                        return float(getattr(res, "Value", res))
+                    except Exception:
+                        pass
+                if isinstance(n.value, ast.Name):
+                    target_o = getattr(obj, n.value.id, None)
+                    if target_o is None and hasattr(obj, "Document") and obj.Document:
+                        target_o = obj.Document.getObject(n.value.id)
+                    if target_o and hasattr(target_o, n.attr):
+                        v = getattr(target_o, n.attr)
+                        return float(getattr(v, "Value", v))
+            if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.UAdd, ast.USub)):
+                op_val = _eval_node(n.operand)
+                return op_val if isinstance(n.op, ast.UAdd) else -op_val
+            if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
+                l = _eval_node(n.left)
+                r = _eval_node(n.right)
+                if isinstance(n.op, ast.Add): return l + r
+                if isinstance(n.op, ast.Sub): return l - r
+                if isinstance(n.op, ast.Mult): return l * r
+                if isinstance(n.op, ast.Div): return l / r
+                if isinstance(n.op, ast.Pow): return l ** r
+            raise ValueError(f"Unsupported node: {type(n)}")
+
+        return _eval_node(node)
+    except Exception:
+        pass
+
+    raise ValueError(f"Cannot evaluate scalar expression: {val_str!r}")
 
 
 METRIC_ALIASES: dict[str, str] = {
@@ -188,60 +292,64 @@ class MetricClusterFilter(Filter):
             selected_clusters = clusters[sel]
             return [it for cl in selected_clusters for it in cl]
 
-        sel_str = str(sel).strip().lower()
-        if not sel_str or sel_str == "0":
+        raw_sel = str(sel).strip()
+        sel_lower = raw_sel.lower()
+        if not raw_sel or raw_sel == "0":
             return clusters[0]
-        if sel_str in ("largest", "max_count"):
+        if sel_lower in ("largest", "max_count"):
             return max(clusters, key=len)
-        if sel_str in ("unique", "single"):
+        if sel_lower in ("unique", "single"):
             return [it for cl in clusters if len(cl) == 1 for it in cl]
-        if sel_str in ("all_equal", "equal"):
+        if sel_lower in ("all_equal", "equal"):
             return [it for cl in clusters for it in cl] if len(clusters) == 1 else []
-        if sel_str.startswith("!="):
+
+        base_obj = items[0].base_obj if items and hasattr(items[0], "base_obj") else None
+
+        for comp_sym in ("!=", "==", ">=", "<=", ">", "<"):
+            if raw_sel.startswith(comp_sym):
+                rhs = raw_sel[len(comp_sym):].strip()
+                try:
+                    target_v = evaluate_scalar_value(rhs or 0.0, base_obj, tolerance=self.tolerance)
+                    if comp_sym == "!=":
+                        return [it for cl in clusters for it in cl if abs(it.metric(self.metric) - target_v) > self.tolerance]
+                    if comp_sym == "==":
+                        return [it for cl in clusters for it in cl if abs(it.metric(self.metric) - target_v) <= self.tolerance]
+                    if comp_sym == ">=":
+                        return [it for cl in clusters for it in cl if it.metric(self.metric) >= target_v - self.tolerance]
+                    if comp_sym == ">":
+                        return [it for cl in clusters for it in cl if it.metric(self.metric) > target_v + self.tolerance]
+                    if comp_sym == "<=":
+                        return [it for cl in clusters for it in cl if it.metric(self.metric) <= target_v + self.tolerance]
+                    if comp_sym == "<":
+                        return [it for cl in clusters for it in cl if it.metric(self.metric) < target_v - self.tolerance]
+                except (ValueError, TypeError):
+                    pass
+
+        # Direct expression index / target value e.g. =VarSet.tier or =Spreadsheet.A1
+        if raw_sel.startswith("=") or ("." in raw_sel and not raw_sel.replace(".", "", 1).isdigit()):
             try:
-                target_v = float(sel_str[2:].strip() or 0.0)
-                return [it for cl in clusters for it in cl if abs(it.metric(self.metric) - target_v) > self.tolerance]
-            except (ValueError, TypeError):
+                target_v = evaluate_scalar_value(raw_sel, base_obj, tolerance=self.tolerance)
+                # First check if target_v matches a cluster's metric value (e.g. radius == 5.0)
+                matched_cl = next((cl for cl in clusters if abs(cl[0].metric(self.metric) - target_v) <= self.tolerance), None)
+                if matched_cl is not None:
+                    return matched_cl
+                # Else check if it's an integer tier index
+                if target_v.is_integer():
+                    idx = int(target_v)
+                    idx = idx if idx >= 0 else len(clusters) + idx
+                    return clusters[idx] if 0 <= idx < len(clusters) else []
+            except Exception:
                 pass
-        if sel_str.startswith("=="):
-            try:
-                target_v = float(sel_str[2:].strip() or 0.0)
-                return [it for cl in clusters for it in cl if abs(it.metric(self.metric) - target_v) <= self.tolerance]
-            except (ValueError, TypeError):
-                pass
-        if sel_str.startswith(">="):
-            try:
-                target_v = float(sel_str[2:].strip() or 0.0)
-                return [it for cl in clusters for it in cl if it.metric(self.metric) >= target_v - self.tolerance]
-            except (ValueError, TypeError):
-                pass
-        if sel_str.startswith(">"):
-            try:
-                target_v = float(sel_str[1:].strip() or 0.0)
-                return [it for cl in clusters for it in cl if it.metric(self.metric) > target_v + self.tolerance]
-            except (ValueError, TypeError):
-                pass
-        if sel_str.startswith("<="):
-            try:
-                target_v = float(sel_str[2:].strip() or 0.0)
-                return [it for cl in clusters for it in cl if it.metric(self.metric) <= target_v + self.tolerance]
-            except (ValueError, TypeError):
-                pass
-        if sel_str.startswith("<"):
-            try:
-                target_v = float(sel_str[1:].strip() or 0.0)
-                return [it for cl in clusters for it in cl if it.metric(self.metric) < target_v - self.tolerance]
-            except (ValueError, TypeError):
-                pass
-        if ":" in sel_str:
-            parts = sel_str.split(":")
+
+        if ":" in raw_sel:
+            parts = raw_sel.split(":")
             start = int(parts[0]) if parts[0] else None
             stop = int(parts[1]) if parts[1] else None
             step = int(parts[2]) if len(parts) > 2 and parts[2] else None
             selected_clusters = clusters[slice(start, stop, step)]
             return [it for cl in selected_clusters for it in cl]
         try:
-            idx = int(sel_str)
+            idx = int(raw_sel)
             idx = idx if idx >= 0 else len(clusters) + idx
             return clusters[idx] if 0 <= idx < len(clusters) else []
         except ValueError:
@@ -255,7 +363,7 @@ class MetricClusterFilter(Filter):
 
 
 class CenterNthFilter(MetricClusterFilter):
-    """>>Axis[N] or <<Axis[N] (backward compatible subclass)."""
+    """>>Axis[N] or <<Axis[N] extremum cluster filter."""
 
     def __init__(self, direction: tuple[float, float, float], n: int = 0, is_max: bool = True, tolerance: float = 1e-4):
         dir_name = next((k for k, v in STANDARD_AXES.items() if v == direction), "Z")
@@ -404,15 +512,23 @@ class TagFilter(Filter):
 
 
 class NumericCompareFilter(Filter):
-    """metric == val, metric > val, etc."""
+    """metric == val, metric > val, etc. Supports FreeCAD expressions (e.g. '=VarSet.param')."""
 
-    def __init__(self, metric: str, op: str, value: float, tolerance: float = 1e-4):
+    def __init__(self, metric: str, op: str, value: Any, tolerance: float = 1e-4):
         self.metric = METRIC_ALIASES.get(metric.lower(), metric.lower())
         self.op = op
         self.value = value
         self.tolerance = tolerance
 
     def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
+        if not items:
+            return []
+        base_obj = items[0].base_obj if hasattr(items[0], "base_obj") else None
+        try:
+            target_val = evaluate_scalar_value(self.value, base_obj, tolerance=self.tolerance)
+        except Exception:
+            return []
+
         res = []
         for it in items:
             try:
@@ -421,17 +537,17 @@ class NumericCompareFilter(Filter):
                 continue
             if not math.isfinite(v):
                 continue
-            if self.op == "==" and abs(v - self.value) <= self.tolerance:
+            if self.op == "==" and abs(v - target_val) <= self.tolerance:
                 res.append(it)
-            elif self.op == "!=" and abs(v - self.value) > self.tolerance:
+            elif self.op == "!=" and abs(v - target_val) > self.tolerance:
                 res.append(it)
-            elif self.op == ">" and v > self.value + self.tolerance:
+            elif self.op == ">" and v > target_val + self.tolerance:
                 res.append(it)
-            elif self.op == ">=" and v >= self.value - self.tolerance:
+            elif self.op == ">=" and v >= target_val - self.tolerance:
                 res.append(it)
-            elif self.op == "<" and v < self.value - self.tolerance:
+            elif self.op == "<" and v < target_val - self.tolerance:
                 res.append(it)
-            elif self.op == "<=" and v <= self.value + self.tolerance:
+            elif self.op == "<=" and v <= target_val + self.tolerance:
                 res.append(it)
         return res
 
@@ -440,22 +556,31 @@ class NumericCompareFilter(Filter):
 
 
 class NumericRangeFilter(Filter):
-    """min_val <= metric <= max_val or metric in [min_val, max_val]."""
+    """min_val <= metric <= max_val or metric in [min_val, max_val]. Supports '=VarSet.param'."""
 
-    def __init__(self, metric: str, min_val: float, max_val: float, tolerance: float = 1e-4):
+    def __init__(self, metric: str, min_val: Any, max_val: Any, tolerance: float = 1e-4):
         self.metric = METRIC_ALIASES.get(metric.lower(), metric.lower())
         self.min_val = min_val
         self.max_val = max_val
         self.tolerance = tolerance
 
     def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
+        if not items:
+            return []
+        base_obj = items[0].base_obj if hasattr(items[0], "base_obj") else None
+        try:
+            min_v = evaluate_scalar_value(self.min_val, base_obj, tolerance=self.tolerance)
+            max_v = evaluate_scalar_value(self.max_val, base_obj, tolerance=self.tolerance)
+        except Exception:
+            return []
+
         res = []
         for it in items:
             try:
                 v = it.metric(self.metric)
             except (KeyError, AttributeError):
                 continue
-            if math.isfinite(v) and (self.min_val - self.tolerance <= v <= self.max_val + self.tolerance):
+            if math.isfinite(v) and (min_v - self.tolerance <= v <= max_v + self.tolerance):
                 res.append(it)
         return res
 
@@ -776,6 +901,7 @@ class ExpressionPipeline:
 def _tokenize_filter(expr: str) -> list[str]:
     """Tokenize a filter string into tokens."""
     token_spec = [
+        ("FC_EXPR", r"=[A-Za-z0-9_][A-Za-z0-9_.]*(?:\s*[\+\-\*\/]\s*[A-Za-z0-9_.]+)*"),
         ("NUMBER", r"-?\d+(?:\.\d+)?"),
         ("AXIS_VEC", r"\([+-]?\d+(?:\.\d+)?\s*,\s*[+-]?\d+(?:\.\d+)?\s*,\s*[+-]?\d+(?:\.\d+)?\)"),
         ("OP2", r">>|<<"),
@@ -783,6 +909,7 @@ def _tokenize_filter(expr: str) -> list[str]:
         ("TAG", r":[A-Za-z_][A-Za-z0-9_]*"),
         ("SLICE_COLON", r":"),
         ("OP1", r"[><|#%+\-]"),
+        ("DOTTED_NAME", r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+"),
         ("WORD", r"[A-Za-z_][A-Za-z0-9_]*"),
         ("LBRACK", r"\["),
         ("RBRACK", r"\]"),
@@ -807,6 +934,22 @@ def _tokenize_filter(expr: str) -> list[str]:
         if kind != "WS":
             tokens.append(val)
     return tokens
+
+
+def _is_scalar_token(tok: str) -> bool:
+    """Check if token is a numeric literal or FreeCAD parameter expression."""
+    if not tok:
+        return False
+    if tok.startswith("="):
+        return True
+    try:
+        float(tok)
+        return True
+    except ValueError:
+        pass
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$", tok):
+        return True
+    return False
 
 
 def _parse_filter_atom(tokens: list[str], idx: int, tolerance: float = 1e-4) -> tuple[Filter, int]:
@@ -883,32 +1026,34 @@ def _parse_filter_atom(tokens: list[str], idx: int, tolerance: float = 1e-4) -> 
         return TypeFilter(tok[1:]), idx + 1
 
     # Numeric range comparisons: min_val <= metric <= max_val or min_val < metric < max_val
-    if re.match(r"^-?\d+(?:\.\d+)?$", tok) and idx + 4 < len(tokens) and tokens[idx+1] in ("<", "<=") and tokens[idx+3] in ("<", "<="):
-        min_v = float(tok)
+    if _is_scalar_token(tok) and idx + 4 < len(tokens) and tokens[idx+1] in ("<", "<=") and tokens[idx+3] in ("<", "<="):
         metric_tok = tokens[idx+2]
-        max_v = float(tokens[idx+4])
-        return NumericRangeFilter(metric_tok, min_v, max_v), idx + 5
+        norm_metric = METRIC_ALIASES.get(metric_tok.lower(), metric_tok.lower())
+        if norm_metric in KNOWN_METRICS or metric_tok.lower() in KNOWN_METRICS:
+            min_v: Any = float(tok) if re.match(r"^-?\d+(?:\.\d+)?$", tok) else tok
+            max_tok = tokens[idx+4]
+            max_v: Any = float(max_tok) if re.match(r"^-?\d+(?:\.\d+)?$", max_tok) else max_tok
+            return NumericRangeFilter(norm_metric, min_v, max_v, tolerance=tolerance), idx + 5
 
     # Numeric comparisons: metric == value, metric > value, metric in [min, max]
     norm_metric = METRIC_ALIASES.get(tok.lower(), tok.lower())
     if norm_metric in KNOWN_METRICS or tok.lower() in KNOWN_METRICS:
         if idx + 2 < len(tokens) and tokens[idx+1] in ("==", "!=", "<", "<=", ">", ">="):
             op = tokens[idx+1]
-            try:
-                val = float(tokens[idx+2])
+            val_tok = tokens[idx+2]
+            if _is_scalar_token(val_tok):
+                val: Any = float(val_tok) if re.match(r"^-?\d+(?:\.\d+)?$", val_tok) else val_tok
                 return NumericCompareFilter(norm_metric, op, val, tolerance=tolerance), idx + 3
-            except ValueError:
-                pass
         if idx + 5 < len(tokens) and tokens[idx+1].lower() == "in" and tokens[idx+2] == "[":
-            try:
-                min_v = float(tokens[idx+3])
-                max_v = float(tokens[idx+5])
+            min_tok = tokens[idx+3]
+            max_tok = tokens[idx+5]
+            if _is_scalar_token(min_tok) and _is_scalar_token(max_tok):
+                min_v = float(min_tok) if re.match(r"^-?\d+(?:\.\d+)?$", min_tok) else min_tok
+                max_v = float(max_tok) if re.match(r"^-?\d+(?:\.\d+)?$", max_tok) else max_tok
                 next_i = idx + 6
                 if next_i < len(tokens) and tokens[next_i] == "]":
                     next_i += 1
-                return NumericRangeFilter(norm_metric, min_v, max_v), next_i
-            except ValueError:
-                pass
+                return NumericRangeFilter(norm_metric, min_v, max_v, tolerance=tolerance), next_i
 
     # Universal Metric Clustering (>>metric[slice] or <<metric[slice])
     if tok in (">>=", ">>", "<<") or tok.startswith((">>", "<<")):
@@ -1092,7 +1237,7 @@ def parse_expression(expr_str: str, default_kind: str = "Face", tolerance: float
         elif c in (')', ']'):
             depth = max(0, depth - 1)
             current.append(c)
-        elif depth == 0 and c == '.' and not (i > 0 and clean[i-1].isdigit() and i + 1 < len(clean) and clean[i+1].isdigit()):
+        elif depth == 0 and c == '.' and re.match(r"^\.[A-Za-z_][A-Za-z0-9_]*\s*\(", clean[i:]):
             stages.append("".join(current).strip())
             current = []
         elif depth == 0 and clean[i:i+2] == "->":
@@ -1437,11 +1582,11 @@ def autocomplete_at_cursor(
 
 
 # ---------------------------------------------------------------------------
-#  Interoperability with Legacy Selectors
+#  Step Sequence to Selector Expression Projection
 # ---------------------------------------------------------------------------
 
 def steps_to_expression(steps: Sequence[Any], kind: str) -> str:
-    """Convert legacy Steps sequence to CadQuery selector expression."""
+    """Convert Steps sequence to canonical CadQuery selector expression."""
     if not steps:
         return f"{kind.lower()}s()" if kind != "Shape" else ""
 
@@ -1489,3 +1634,214 @@ def steps_to_expression(steps: Sequence[Any], kind: str) -> str:
             parts.append(f"{sym}{metric}[0:{count}]" if count > 1 else f"{sym}{metric}[0]")
 
     return " and ".join(parts) if parts else f"{kind.lower()}s()"
+
+
+# ---------------------------------------------------------------------------
+#  Synchronized Expression Clause Decomposition & 3D Color Mapping
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExpressionClause:
+    """Discrete semantic clause of a selector expression mapped to a syntax range and 3D color."""
+    text: str
+    start_pos: int
+    end_pos: int
+    color_index: int
+    matched_subnames: set[str] = field(default_factory=set)
+
+
+SYNCHRONIZED_PALETTE: list[dict[str, Any]] = [
+    {
+        "name": "Cyan",
+        "hex": "#00bcd4",
+        "rgba_3d": (0.0, 0.737, 0.831, 0.0),
+        "bg_editor": "rgba(0, 188, 212, 0.18)",
+        "border_editor": "#00bcd4",
+        "text_dark": "#00838f",
+    },
+    {
+        "name": "Amber",
+        "hex": "#ff9800",
+        "rgba_3d": (1.0, 0.596, 0.0, 0.0),
+        "bg_editor": "rgba(255, 152, 0, 0.18)",
+        "border_editor": "#ff9800",
+        "text_dark": "#e65100",
+    },
+    {
+        "name": "Purple",
+        "hex": "#ab47bc",
+        "rgba_3d": (0.671, 0.278, 0.737, 0.0),
+        "bg_editor": "rgba(171, 71, 188, 0.18)",
+        "border_editor": "#ab47bc",
+        "text_dark": "#6a1b9a",
+    },
+    {
+        "name": "Teal",
+        "hex": "#26a69a",
+        "rgba_3d": (0.149, 0.651, 0.604, 0.0),
+        "bg_editor": "rgba(38, 166, 154, 0.18)",
+        "border_editor": "#26a69a",
+        "text_dark": "#00695c",
+    },
+    {
+        "name": "Pink",
+        "hex": "#ec407a",
+        "rgba_3d": (0.925, 0.251, 0.478, 0.0),
+        "bg_editor": "rgba(236, 64, 122, 0.18)",
+        "border_editor": "#ec407a",
+        "text_dark": "#ad1457",
+    },
+    {
+        "name": "Indigo",
+        "hex": "#5c6bc0",
+        "rgba_3d": (0.361, 0.420, 0.753, 0.0),
+        "bg_editor": "rgba(92, 107, 192, 0.18)",
+        "border_editor": "#5c6bc0",
+        "text_dark": "#283593",
+    },
+]
+
+OVERLAP_COLOR: dict[str, Any] = {
+    "name": "Emerald",
+    "hex": "#43a047",
+    "rgba_3d": (0.263, 0.627, 0.278, 0.0),
+    "bg_editor": "rgba(67, 160, 71, 0.22)",
+    "border_editor": "#43a047",
+    "text_dark": "#2e7d32",
+}
+
+
+def decompose_clauses(full_text: str) -> list[ExpressionClause]:
+    """Decompose selector expression into discrete semantic clauses with character offsets."""
+    text = full_text.strip()
+    if not text:
+        return []
+
+    kinds_set = {"faces", "edges", "vertices", "wires", "solids"}
+    m_wrap = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([\"'])(.*)\2\s*\)$", text, re.DOTALL)
+    if m_wrap and m_wrap.group(1).lower() in kinds_set:
+        inner = m_wrap.group(3)
+        base_offset = full_text.find(inner)
+    else:
+        inner = text
+        base_offset = full_text.find(text)
+
+    clauses: list[ExpressionClause] = []
+    depth = 0
+    bracket_depth = 0
+    in_quote = None
+    start = 0
+    i = 0
+    n = len(inner)
+    color_idx = 0
+
+    def add_clause(raw_start: int, raw_end: int):
+        nonlocal color_idx
+        chunk = inner[raw_start:raw_end]
+        stripped = chunk.strip()
+        if stripped:
+            lead = len(chunk) - len(chunk.lstrip())
+            c_start = base_offset + raw_start + lead
+            c_end = c_start + len(stripped)
+            clauses.append(ExpressionClause(
+                text=stripped,
+                start_pos=c_start,
+                end_pos=c_end,
+                color_index=color_idx % len(SYNCHRONIZED_PALETTE)
+            ))
+            color_idx += 1
+
+    while i < n:
+        c = inner[i]
+        if in_quote:
+            if c == in_quote:
+                in_quote = None
+        elif c in ('"', "'"):
+            in_quote = c
+        elif c in ('(',):
+            depth += 1
+        elif c in (')',):
+            depth = max(0, depth - 1)
+        elif c in ('[',):
+            bracket_depth += 1
+        elif c in (']',):
+            bracket_depth = max(0, bracket_depth - 1)
+        elif depth == 0 and bracket_depth == 0:
+            is_sep = False
+            sep_len = 0
+            if c == '|':
+                rem = inner[i+1:].lstrip()
+                if rem and (rem[0].upper() in ('X', 'Y', 'Z') or rem[0] == '('):
+                    pass  # Parallel axis operator |X, not a clause separator
+                else:
+                    is_sep = True
+                    sep_len = 1
+            elif c in (',', '&'):
+                is_sep = True
+                sep_len = 1
+            else:
+                m_word = re.match(r"^(or|and|exc)\b", inner[i:], re.IGNORECASE)
+                if m_word:
+                    if i == 0 or not (inner[i-1].isalnum() or inner[i-1] == "_"):
+                        is_sep = True
+                        sep_len = len(m_word.group(1))
+
+            if is_sep:
+                add_clause(start, i)
+                i += sep_len
+                start = i
+                continue
+        i += 1
+    add_clause(start, n)
+    return clauses
+
+
+def compute_synchronized_colors(
+    base_obj: Any,
+    expr: str,
+    kind: Optional[str] = "Face",
+    tolerance: float = 1e-4,
+    active_clause_idx: Optional[int] = None,
+) -> tuple[list[ExpressionClause], dict[str, tuple[float, float, float, float]]]:
+    """Compute 1:1 color synchronization between expression clauses and 3D geometry subnames."""
+    clauses = decompose_clauses(expr)
+    if not clauses or base_obj is None:
+        return clauses, {}
+
+    # Evaluate each clause individually to determine which subelements it selects
+    for c in clauses:
+        try:
+            items = evaluate_expression_items(base_obj, c.text, kind=kind, tolerance=tolerance)
+            c.matched_subnames = {it.subname for it in items if getattr(it, "subname", None)}
+        except Exception:
+            c.matched_subnames = set()
+
+    # Also evaluate the entire combined expression
+    try:
+        all_items = evaluate_expression_items(base_obj, expr, kind=kind, tolerance=tolerance)
+        all_subnames = {it.subname for it in all_items if getattr(it, "subname", None)}
+    except Exception:
+        all_subnames = set().union(*(c.matched_subnames for c in clauses))
+
+    element_colors: dict[str, tuple[float, float, float, float]] = {}
+
+    for sname in all_subnames:
+        matching_clauses = [c for c in clauses if sname in c.matched_subnames]
+        if len(matching_clauses) == 1:
+            c = matching_clauses[0]
+            palette = SYNCHRONIZED_PALETTE[c.color_index % len(SYNCHRONIZED_PALETTE)]
+            element_colors[sname] = palette["rgba_3d"]
+        elif len(matching_clauses) > 1:
+            element_colors[sname] = OVERLAP_COLOR["rgba_3d"]
+        else:
+            element_colors[sname] = OVERLAP_COLOR["rgba_3d"]
+
+    # If an active clause is specified, emphasize its elements
+    if active_clause_idx is not None and 0 <= active_clause_idx < len(clauses):
+        active_clause = clauses[active_clause_idx]
+        active_palette = SYNCHRONIZED_PALETTE[active_clause.color_index % len(SYNCHRONIZED_PALETTE)]
+        for sname in active_clause.matched_subnames:
+            element_colors[sname] = active_palette["rgba_3d"]
+
+    return clauses, element_colors
+

@@ -352,7 +352,95 @@ class TestCadQueryExpressions(unittest.TestCase):
         edges_nonzero = evaluate_expression(plate, ">>length[!=0]", kind="Edge")
         self.assertEqual(len(edges_nonzero), len(plate.Shape.Edges))
 
+    def test_14_freecad_parametric_expressions(self):
+        """Verify integration with FreeCAD parametric expressions (=VarSet.param, arithmetic, units)."""
+        varset = self.doc.addObject("App::VarSet", "ParamVarSet")
+        varset.addProperty("App::PropertyLength", "drill_r")
+        varset.drill_r = 5.0
+        varset.addProperty("App::PropertyLength", "min_r")
+        varset.min_r = 3.0
+        varset.addProperty("App::PropertyLength", "max_r")
+        varset.max_r = 8.0
+        varset.addProperty("App::PropertyInteger", "target_tier")
+        varset.target_tier = 0
+        self.doc.recompute()
+
+        # 1. Compare equality with leading '=': radius == =ParamVarSet.drill_r
+        res_eq = evaluate_expression(self.plate, "radius == =ParamVarSet.drill_r", kind="Face")
+        self.assertEqual(len(res_eq), 1)
+
+        # 2. Compare equality with bare dotted name: radius == ParamVarSet.drill_r
+        res_dotted = evaluate_expression(self.plate, "radius == ParamVarSet.drill_r", kind="Face")
+        self.assertEqual(len(res_dotted), 1)
+        self.assertEqual(res_eq[0].subname, res_dotted[0].subname)
+
+        # 3. Numeric range with expressions: =ParamVarSet.min_r <= radius <= =ParamVarSet.max_r
+        res_range = evaluate_expression(self.plate, "=ParamVarSet.min_r <= radius <= =ParamVarSet.max_r", kind="Face")
+        self.assertEqual(len(res_range), 1)
+
+        # 4. Arithmetic expression: radius == =ParamVarSet.drill_r * 2 (matches 10.0 hole)
+        res_arith = evaluate_expression(self.plate, "radius == =ParamVarSet.drill_r * 2", kind="Face")
+        self.assertEqual(len(res_arith), 1)
+        self.assertNotEqual(res_eq[0].subname, res_arith[0].subname)
+
+        # 5. Cluster bracket expression: >>radius[=ParamVarSet.drill_r]
+        res_cluster = evaluate_expression(self.plate, ">>radius[=ParamVarSet.drill_r]", kind="Face")
+        self.assertEqual(len(res_cluster), 1)
+        self.assertEqual(res_cluster[0].subname, res_eq[0].subname)
+
+        # 6. Cluster condition with expression: >>radius[!= =ParamVarSet.drill_r]
+        res_neq = evaluate_expression(self.plate, ">>radius[!= =ParamVarSet.drill_r]", kind="Face")
+        self.assertEqual(len(res_neq), 2)  # holes with r=2 and r=10
+
+    def test_15_synchronized_palette_and_clause_decomposition(self):
+        """Verify decomposition of clauses and 1:1 color synchronization with 3D elements."""
+        from fs_expression import (
+            decompose_clauses,
+            compute_synchronized_colors,
+            SYNCHRONIZED_PALETTE,
+            OVERLAP_COLOR,
+        )
+
+        # 1. Decompose compound union expression
+        clauses = decompose_clauses(">Z | <Z")
+        self.assertEqual(len(clauses), 2)
+        self.assertEqual(clauses[0].text, ">Z")
+        self.assertEqual(clauses[0].color_index, 0)
+        self.assertEqual(clauses[1].text, "<Z")
+        self.assertEqual(clauses[1].color_index, 1)
+
+        # 2. Decompose wrapped method expression: faces(">Z, <Z, |X")
+        clauses_wrap = decompose_clauses('faces(">Z, <Z, |X")')
+        self.assertEqual(len(clauses_wrap), 3)
+        self.assertEqual(clauses_wrap[0].text, ">Z")
+        self.assertEqual(clauses_wrap[1].text, "<Z")
+        self.assertEqual(clauses_wrap[2].text, "|X")
+
+        # 3. Compute synchronized 3D colors on box
+        res_clauses, color_map = compute_synchronized_colors(self.box, ">Z | <Z", kind="Face")
+        self.assertEqual(len(res_clauses), 2)
+        self.assertIn("Face6", color_map)
+        self.assertIn("Face5", color_map)
+        # Face6 matches Clause 0 (Cyan)
+        self.assertEqual(color_map["Face6"], SYNCHRONIZED_PALETTE[0]["rgba_3d"])
+        # Face5 matches Clause 1 (Amber)
+        self.assertEqual(color_map["Face5"], SYNCHRONIZED_PALETTE[1]["rgba_3d"])
+
+        # 4. Overlap / intersection receives emerald overlap color
+        res_clauses2, color_map2 = compute_synchronized_colors(
+            self.box, "%Plane and >Z", kind="Face"
+        )
+        self.assertIn("Face6", color_map2)
+        self.assertEqual(color_map2["Face6"], OVERLAP_COLOR["rgba_3d"])
+
+        # 5. Active clause focus accentuates the active clause's elements
+        _, color_focus = compute_synchronized_colors(
+            self.box, ">Z | <Z", kind="Face", active_clause_idx=1
+        )
+        self.assertEqual(color_focus["Face5"], SYNCHRONIZED_PALETTE[1]["rgba_3d"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

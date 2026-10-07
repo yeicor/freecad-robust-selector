@@ -373,6 +373,47 @@ class TestRealFreeCADGui(unittest.TestCase):
         panel.copy_python_btn.click()
         self.assertIn("copied to clipboard", panel.status.text())
 
+    def test_13_3d_viewport_synchronized_color_preview(self):
+        """Verify 1:1 color synchronization between editor clauses and 3D geometry in viewport."""
+        from fs_gui import FeatureSelectorPanel
+        from fs_expression import SYNCHRONIZED_PALETTE
+        panel = FeatureSelectorPanel.instance()
+        panel.show_panel()
+
+        box = self.doc.getObject("GuiBox")
+        panel.source_obj = box
+        panel.kind = "Face"
+
+        # 1. Multi-clause expression: >Z | <Z
+        panel.expr_edit.setPlainText(">Z | <Z")
+
+        # Verify clauses decomposed in highlighter
+        clauses = panel.expr_edit.highlighter._clauses
+        self.assertEqual(len(clauses), 2)
+        self.assertEqual(clauses[0].text, ">Z")
+        self.assertEqual(clauses[1].text, "<Z")
+
+        # 2. Test cursor movement updates active clause
+        cursor = panel.expr_edit.textCursor()
+        # Position 1 is inside '>Z'
+        cursor.setPosition(1)
+        panel.expr_edit.setTextCursor(cursor)
+        self.assertEqual(panel.expr_edit.highlighter._active_clause_idx, 0)
+
+        # Position 6 is inside '<Z'
+        cursor.setPosition(6)
+        panel.expr_edit.setTextCursor(cursor)
+        self.assertEqual(panel.expr_edit.highlighter._active_clause_idx, 1)
+
+        # 3. Parametric expression in GUI editor with VarSet
+        varset = self.doc.addObject("App::VarSet", "GuiVarSet")
+        varset.addProperty("App::PropertyLength", "test_h")
+        varset.test_h = 25.0
+        self.doc.recompute()
+
+        panel.expr_edit.setPlainText(">Z and area > 10")
+        self.assertIn("Face", panel.current_result.text())
+
 
 if __name__ == "__main__":
     import sys
