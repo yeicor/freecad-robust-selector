@@ -67,10 +67,29 @@ PREDICATE_NAMES = (
 )
 
 
-class Candidate:
+class Vector3(tuple):
+    """3D vector that is a tuple and supports .x, .y, .z and vector math."""
+
+    def __new__(cls, x: float = 0.0, y: float = 0.0, z: float = 0.0):
+        return super().__new__(cls, (float(x), float(y), float(z)))
+
+    @property
+    def x(self) -> float:
+        return self[0]
+
+    @property
+    def y(self) -> float:
+        return self[1]
+
+    @property
+    def z(self) -> float:
+        return self[2]
+
+
+class GeometryItem:
     def __init__(
         self,
-        ref: FeatureRef,
+        ref: Any = None,
         center: Any = None,
         geom_type: str = "",
         shape: Any = None,
@@ -97,12 +116,37 @@ class Candidate:
         axis_direction: Any = None,
         axis_point: Any = None,
         _obj: Any = None,
+        subname: Optional[str] = None,
+        kind: Optional[str] = None,
+        base_obj: Any = None,
     ):
-        self.ref = ref
-        self.shape = shape
-        self._obj = _obj
-        self._center = center
-        self._geom_type = geom_type
+        if isinstance(ref, FeatureRef):
+            self.ref = ref
+            self.shape = shape
+            self._obj = _obj if _obj is not None else base_obj
+            self._center = center
+            self._geom_type = geom_type
+        elif ref is not None and not isinstance(ref, FeatureRef):
+            # EvaluatorItem style: EvaluatorItem(shape, subname, kind, base_obj)
+            # Positional mapping: ref=shape, center=subname, geom_type=kind, shape=base_obj
+            self.shape = ref
+            target_subname = subname if subname is not None else (str(center) if isinstance(center, str) else "")
+            target_kind = kind if kind is not None else (str(geom_type) if geom_type else "Face")
+            self._obj = base_obj if base_obj is not None else (_obj if _obj is not None else shape)
+            obj_name = getattr(self._obj, "Name", "") if self._obj else ""
+            self.ref = FeatureRef(obj_name, target_subname, target_kind)
+            self._center = None if isinstance(center, str) else center
+            self._geom_type = "" if geom_type in FEATURE_KINDS else geom_type
+        else:
+            self.shape = shape
+            self._obj = _obj if _obj is not None else base_obj
+            target_subname = subname or ""
+            target_kind = kind or "Face"
+            obj_name = getattr(self._obj, "Name", "") if self._obj else ""
+            self.ref = FeatureRef(obj_name, target_subname, target_kind)
+            self._center = center
+            self._geom_type = geom_type
+
         self._direction = direction
         self._area = area
         self._length = length
@@ -127,7 +171,7 @@ class Candidate:
         self._axis_point = axis_point
 
     def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, Candidate):
+        if not isinstance(other, GeometryItem):
             return False
         return self.ref == other.ref
 
@@ -135,13 +179,57 @@ class Candidate:
         return hash(self.ref)
 
     @property
+    def subname(self) -> str:
+        return self.ref.subname
+
+    @property
+    def kind(self) -> str:
+        return self.ref.kind
+
+    @property
+    def base_obj(self) -> Any:
+        return self._obj
+
+    @property
+    def length_val(self) -> float:
+        return self.length
+
+    @property
+    def normal(self) -> Optional[tuple[float, float, float]]:
+        if self.ref.kind == "Face" and self.direction is not None:
+            d = self.direction
+            l = math.hypot(d.x, d.y, d.z)
+            return (d.x / l, d.y / l, d.z / l) if l > 1e-12 else (0.0, 0.0, 1.0)
+        return None
+
+    @property
+    def tangent(self) -> Optional[tuple[float, float, float]]:
+        if self.ref.kind == "Edge" and self.direction is not None:
+            d = self.direction
+            l = math.hypot(d.x, d.y, d.z)
+            return (d.x / l, d.y / l, d.z / l) if l > 1e-12 else (0.0, 0.0, 1.0)
+        return None
+
+    @property
+    def center_tuple(self) -> tuple[float, float, float]:
+        c = self.center
+        if isinstance(c, (tuple, list)) and len(c) >= 3:
+            return (float(c[0]), float(c[1]), float(c[2]))
+        if hasattr(c, "x") and hasattr(c, "y") and hasattr(c, "z"):
+            return (float(c.x), float(c.y), float(c.z))
+        return (0.0, 0.0, 0.0)
+
+    @property
     def center(self) -> Any:
         if self._center is None:
-            if self.shape is not None:
-                self._center = feature_center(self._obj, self.shape)
+            if self.shape is not None and not isinstance(self.shape, str):
+                try:
+                    self._center = feature_center(self._obj, self.shape)
+                except Exception:
+                    self._center = (0.0, 0.0, 0.0)
             else:
                 import FreeCAD as App
-                self._center = App.Vector(0, 0, 0)
+                self._center = App.Vector(0, 0, 0) if App is not None else (0.0, 0.0, 0.0)
         return self._center
 
     @property
@@ -325,6 +413,19 @@ class Candidate:
         return math.hypot(self.center.x, self.center.y)
 
     def metric(self, name: str) -> float:
+        name = name.lower()
+        alias_map = {
+            "rad": "radius",
+            "r": "radius",
+            "dia": "diameter",
+            "d": "diameter",
+            "len": "length",
+            "l": "length",
+            "vol": "volume",
+            "dist": "distance",
+            "perim": "perimeter",
+        }
+        name = alias_map.get(name, name)
         if name in ("x", "y", "z"):
             return float(getattr(self.center, name))
         if name == "distance":
@@ -394,6 +495,10 @@ class Candidate:
         if name == "vertex_valence":
             return float(self.vertex_valence)
         raise KeyError(name)
+
+
+Candidate = GeometryItem
+EvaluatorItem = GeometryItem
 
 
 def _shape_counts(shape: Any) -> tuple[int, int, int, int, int, int]:
@@ -788,12 +893,8 @@ class Selector:
                 current = apply_step(current, step)
             return current
         if self.expression:
-            from fs_expression import evaluate_expression
-            refs = evaluate_expression(obj, self.expression, kind=self.kind)
-            if isinstance(obj, (list, tuple)) and obj:
-                sub_set = {r.subname for r in refs}
-                return [c for c in obj if getattr(getattr(c, "ref", None), "subname", "") in sub_set]
-            return [candidate_for(obj, r.subname, r.kind) for r in refs]
+            from fs_expression import evaluate_expression_items
+            return evaluate_expression_items(obj, self.expression, kind=self.kind)
         return obj if isinstance(obj, list) else candidates(obj, self.kind)
 
     def evaluate(self, obj: Any) -> list[FeatureRef]:

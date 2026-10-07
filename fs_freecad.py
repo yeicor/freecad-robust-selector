@@ -37,11 +37,18 @@ def feature_name(obj: Any) -> str:
 
 
 def has_shape(obj: Any) -> bool:
-    shape = getattr(obj, "Shape", None)
-    try:
-        return shape is not None and not shape.isNull()
-    except (AttributeError, TypeError):
-        return shape is not None
+    if hasattr(obj, "Shape"):
+        shape = obj.Shape
+        try:
+            return shape is not None and not shape.isNull()
+        except (AttributeError, TypeError):
+            return shape is not None
+    if hasattr(obj, "Faces") and hasattr(obj, "Edges"):
+        try:
+            return not obj.isNull()
+        except (AttributeError, TypeError):
+            return True
+    return False
 
 
 def _plural(kind: str) -> str:
@@ -64,10 +71,11 @@ def features_from_object(obj: Any, kind: str) -> list[Any]:
     """
     if not has_shape(obj):
         return []
+    shape = getattr(obj, "Shape", obj)
     if kind == "Shape":
-        return [obj.Shape]
+        return [shape]
     attr = _plural(kind)
-    return list(getattr(obj.Shape, attr, [])) if attr else []
+    return list(getattr(shape, attr, [])) if attr else []
 
 
 def shape_type_from_subname(subname: str) -> Optional[str]:
@@ -302,7 +310,7 @@ def adjacent_face_counts(source_obj: Any) -> dict[str, int]:
     """Count source faces incident to each edge, using fast OCC ancestors or identity fallback."""
     counts: dict[str, int] = {}
     edges = features_from_object(source_obj, "Edge")
-    shape = getattr(source_obj, "Shape", None)
+    shape = getattr(source_obj, "Shape", source_obj)
     if shape is not None and hasattr(shape, "ancestorsOfType") and Part is not None:
         try:
             for idx, edge in enumerate(edges, 1):
@@ -330,7 +338,7 @@ def adjacent_vertex_counts(source_obj: Any) -> dict[str, int]:
     """Count incident edges for each source vertex using fast OCC ancestors or identity fallback."""
     counts: dict[str, int] = {}
     vertices = features_from_object(source_obj, "Vertex")
-    shape = getattr(source_obj, "Shape", None)
+    shape = getattr(source_obj, "Shape", source_obj)
     if shape is not None and hasattr(shape, "ancestorsOfType") and Part is not None:
         try:
             for idx, vertex in enumerate(vertices, 1):
@@ -360,7 +368,7 @@ def edge_convexities(source_obj: Any) -> dict[str, str]:
     Non-manifold or open sheet edges are classified as 'open' or 'non_manifold'.
     """
     counts: dict[str, str] = {}
-    shape = getattr(source_obj, "Shape", None)
+    shape = getattr(source_obj, "Shape", source_obj)
     if shape is None or not hasattr(shape, "ancestorsOfType") or Part is None:
         return counts
 

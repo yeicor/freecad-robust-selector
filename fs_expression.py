@@ -11,6 +11,28 @@ import re
 from typing import Any, Callable, Iterable, Optional, Sequence, Union
 
 from fs_freecad import FeatureRef, shape_type_from_subname
+from fs_selector import GeometryItem, candidates, candidate_for
+
+EvaluatorItem = GeometryItem
+
+
+METRIC_ALIASES: dict[str, str] = {
+    "rad": "radius",
+    "r": "radius",
+    "dia": "diameter",
+    "d": "diameter",
+    "len": "length",
+    "l": "length",
+    "perim": "perimeter",
+    "vol": "volume",
+    "dist": "distance",
+}
+
+KNOWN_METRICS = {
+    "x", "y", "z", "distance", "length", "perimeter", "area", "volume",
+    "radius", "diameter", "compactness", "axis_distance_x", "axis_distance_y",
+    "axis_distance_z", "hole_count", "adjacent_face_count", "vertex_valence",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -73,107 +95,13 @@ def parse_vector(token: str) -> tuple[float, float, float]:
 
 
 # ---------------------------------------------------------------------------
-#  Evaluator item (lazy wrapper around FreeCAD topological subshapes)
-# ---------------------------------------------------------------------------
-
-class EvaluatorItem:
-    """Wrapper around a FreeCAD subshape with lazy geometry caching."""
-
-    def __init__(self, shape: Any, subname: str, kind: str, base_obj: Any = None):
-        self.shape = shape
-        self.subname = subname
-        self.kind = kind
-        self.base_obj = base_obj
-        self._center: Optional[tuple[float, float, float]] = None
-        self._normal: Optional[tuple[float, float, float]] = None
-        self._tangent: Optional[tuple[float, float, float]] = None
-        self._geom_type: Optional[str] = None
-        self._area: Optional[float] = None
-        self._length_val: Optional[float] = None
-
-    @property
-    def center(self) -> tuple[float, float, float]:
-        if self._center is None:
-            if hasattr(self.shape, "Point"):
-                p = self.shape.Point
-                self._center = (float(p.x), float(p.y), float(p.z))
-            elif hasattr(self.shape, "CenterOfMass"):
-                c = self.shape.CenterOfMass
-                self._center = (float(c.x), float(c.y), float(c.z))
-            else:
-                self._center = (0.0, 0.0, 0.0)
-        return self._center
-
-    @property
-    def geom_type(self) -> str:
-        if self._geom_type is None:
-            gt = ""
-            surf = getattr(self.shape, "Surface", None)
-            curv = getattr(self.shape, "Curve", None)
-            if surf is not None:
-                tid = getattr(surf, "TypeId", "")
-                gt = tid.replace("Part::Geom", "").upper()
-            elif curv is not None:
-                tid = getattr(curv, "TypeId", "")
-                gt = tid.replace("Part::Geom", "").upper()
-            self._geom_type = gt
-        return self._geom_type
-
-    @property
-    def normal(self) -> Optional[tuple[float, float, float]]:
-        if self._normal is None and self.kind == "Face":
-            try:
-                surf = getattr(self.shape, "Surface", None)
-                if surf and "Plane" in getattr(surf, "TypeId", ""):
-                    axis = getattr(surf, "Axis", None)
-                    if axis:
-                        self._normal = _normalize((float(axis.x), float(axis.y), float(axis.z)))
-                if self._normal is None and hasattr(self.shape, "normalAt"):
-                    n = self.shape.normalAt(0, 0)
-                    self._normal = _normalize((float(n.x), float(n.y), float(n.z)))
-            except Exception:
-                self._normal = (0.0, 0.0, 1.0)
-        return self._normal
-
-    @property
-    def tangent(self) -> Optional[tuple[float, float, float]]:
-        if self._tangent is None and self.kind == "Edge":
-            try:
-                curv = getattr(self.shape, "Curve", None)
-                if curv and "Line" in getattr(curv, "TypeId", ""):
-                    v1 = self.shape.Vertexes[0].Point
-                    v2 = self.shape.Vertexes[-1].Point
-                    diff = (float(v2.x - v1.x), float(v2.y - v1.y), float(v2.z - v1.z))
-                    self._tangent = _normalize(diff)
-                elif hasattr(self.shape, "tangentAt"):
-                    mid = 0.5 * (self.shape.FirstParameter + self.shape.LastParameter)
-                    t = self.shape.tangentAt(mid)
-                    self._tangent = _normalize((float(t.x), float(t.y), float(t.z)))
-            except Exception:
-                self._tangent = (0.0, 0.0, 1.0)
-        return self._tangent
-
-    @property
-    def area(self) -> float:
-        if self._area is None:
-            self._area = float(getattr(self.shape, "Area", 0.0) or 0.0)
-        return self._area
-
-    @property
-    def length_val(self) -> float:
-        if self._length_val is None:
-            self._length_val = float(getattr(self.shape, "Length", 0.0) or 0.0)
-        return self._length_val
-
-
-# ---------------------------------------------------------------------------
 #  CadQuery Selector Filters
 # ---------------------------------------------------------------------------
 
 class Filter:
     """Base selector filter."""
 
-    def apply(self, items: Sequence[EvaluatorItem]) -> list[EvaluatorItem]:
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
         return list(items)
 
     def describe(self) -> str:
@@ -188,10 +116,10 @@ class DirectionMinMaxFilter(Filter):
         self.is_max = is_max
         self.tolerance = tolerance
 
-    def apply(self, items: Sequence[EvaluatorItem]) -> list[EvaluatorItem]:
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
         if not items:
             return []
-        scores = [_dot(item.center, self.direction) for item in items]
+        scores = [_dot(item.center_tuple, self.direction) for item in items]
         extreme = max(scores) if self.is_max else min(scores)
         return [item for item, score in zip(items, scores) if abs(score - extreme) <= self.tolerance]
 
@@ -200,38 +128,100 @@ class DirectionMinMaxFilter(Filter):
         return f"{'>' if self.is_max else '<'}{dir_name}"
 
 
-class CenterNthFilter(Filter):
-    """>>Axis[N] or <<Axis[N] or >Axis[N] (Nth cluster in direction)."""
+class MetricClusterFilter(Filter):
+    """>>metric[N] or <<metric[N] or >>metric[start:end] (clustering equal/epsilon values)."""
 
-    def __init__(self, direction: tuple[float, float, float], n: int, is_max: bool = True, tolerance: float = 1e-4):
-        self.direction = direction
-        self.n = n
-        self.is_max = is_max
+    def __init__(
+        self,
+        metric: str,
+        selector: Union[int, str, slice] = "0",
+        is_descending: bool = True,
+        tolerance: float = 1e-4,
+    ):
+        self.metric = metric
+        self.selector = selector
+        self.is_descending = is_descending
         self.tolerance = tolerance
 
-    def apply(self, items: Sequence[EvaluatorItem]) -> list[EvaluatorItem]:
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
         if not items:
             return []
-        scored = [(item, _dot(item.center, self.direction)) for item in items]
-        scored.sort(key=lambda pair: pair[1], reverse=self.is_max)
+        m_norm = METRIC_ALIASES.get(self.metric.lower(), self.metric.lower())
+        is_axis = self.metric.upper() in STANDARD_AXES
 
-        clusters: list[list[EvaluatorItem]] = []
-        for item, score in scored:
-            if not clusters or abs(score - _dot(clusters[-1][0].center, self.direction)) > self.tolerance:
-                clusters.append([item])
+        scored: list[tuple[GeometryItem, float]] = []
+        for it in items:
+            if is_axis:
+                vec = STANDARD_AXES[self.metric.upper()]
+                score = _dot(it.center_tuple, vec)
             else:
-                clusters[-1].append(item)
+                try:
+                    score = it.metric(m_norm)
+                except (KeyError, AttributeError):
+                    score = float("nan")
+            if math.isfinite(score):
+                scored.append((it, score))
+
+        if not scored:
+            return []
+
+        scored.sort(key=lambda p: p[1], reverse=self.is_descending)
+
+        clusters: list[list[GeometryItem]] = []
+        last_val: Optional[float] = None
+        for it, val in scored:
+            if last_val is None or abs(val - last_val) > self.tolerance:
+                clusters.append([it])
+                last_val = val
+            else:
+                clusters[-1].append(it)
 
         if not clusters:
             return []
-        idx = self.n if self.n >= 0 else len(clusters) + self.n
-        if 0 <= idx < len(clusters):
-            return clusters[idx]
-        return []
+
+        sel = self.selector
+        if isinstance(sel, int):
+            idx = sel if sel >= 0 else len(clusters) + sel
+            return clusters[idx] if 0 <= idx < len(clusters) else []
+
+        if isinstance(sel, slice):
+            selected_clusters = clusters[sel]
+            return [it for cl in selected_clusters for it in cl]
+
+        sel_str = str(sel).strip().lower()
+        if not sel_str or sel_str == "0":
+            return clusters[0]
+        if sel_str in ("largest", "max_count"):
+            return max(clusters, key=len)
+        if sel_str in ("unique", "single"):
+            return [it for cl in clusters if len(cl) == 1 for it in cl]
+        if ":" in sel_str:
+            parts = sel_str.split(":")
+            start = int(parts[0]) if parts[0] else None
+            stop = int(parts[1]) if parts[1] else None
+            step = int(parts[2]) if len(parts) > 2 and parts[2] else None
+            selected_clusters = clusters[slice(start, stop, step)]
+            return [it for cl in selected_clusters for it in cl]
+        try:
+            idx = int(sel_str)
+            idx = idx if idx >= 0 else len(clusters) + idx
+            return clusters[idx] if 0 <= idx < len(clusters) else []
+        except ValueError:
+            return []
 
     def describe(self) -> str:
-        dir_name = next((k for k, v in STANDARD_AXES.items() if v == self.direction), str(self.direction))
-        return f"{'>>' if self.is_max else '<<'}{dir_name}[{self.n}]"
+        prefix = ">>" if self.is_descending else "<<"
+        sel_repr = self.selector if not isinstance(self.selector, slice) else f"{self.selector.start or ''}:{self.selector.stop or ''}"
+        name = self.metric.upper() if self.metric.upper() in STANDARD_AXES else self.metric
+        return f"{prefix}{name}[{sel_repr}]"
+
+
+class CenterNthFilter(MetricClusterFilter):
+    """>>Axis[N] or <<Axis[N] (backward compatible subclass)."""
+
+    def __init__(self, direction: tuple[float, float, float], n: int = 0, is_max: bool = True, tolerance: float = 1e-4):
+        dir_name = next((k for k, v in STANDARD_AXES.items() if v == direction), "Z")
+        super().__init__(dir_name, selector=n, is_descending=is_max, tolerance=tolerance)
 
 
 class DirectionFilter(Filter):
@@ -300,12 +290,272 @@ class TypeFilter(Filter):
     def __init__(self, geom_type: str):
         self.geom_type = geom_type.strip().upper()
 
-    def apply(self, items: Sequence[EvaluatorItem]) -> list[EvaluatorItem]:
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
         target = self.geom_type
         return [item for item in items if item.geom_type == target or item.geom_type.endswith(target)]
 
     def describe(self) -> str:
         return f"%{self.geom_type.capitalize()}"
+
+
+class TagFilter(Filter):
+    """:concave, :convex, :smooth, :seam, :boundary, :closed, :planar, etc."""
+
+    def __init__(self, tag: str):
+        self.tag = tag.lower().strip().lstrip(":")
+
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
+        t = self.tag
+        if t in ("concave", "internal"):
+            return [it for it in items if getattr(it, "convexity", None) == "concave"]
+        if t in ("convex", "external"):
+            return [it for it in items if getattr(it, "convexity", None) == "convex"]
+        if t == "smooth":
+            return [it for it in items if getattr(it, "convexity", None) == "smooth"]
+        if t == "closed":
+            return [it for it in items if bool(getattr(it, "closed", False))]
+        if t in ("boundary", "outer"):
+            return [it for it in items if getattr(it, "adjacent_face_count", 0) == 1]
+        if t == "manifold":
+            return [it for it in items if getattr(it, "adjacent_face_count", 0) == 2]
+        if t in ("hole", "inner"):
+            return [it for it in items if getattr(it, "hole_count", 0) > 0]
+        if t == "planar":
+            return [it for it in items if "PLANE" in getattr(it, "geom_type", "")]
+        if t == "cylindrical":
+            return [it for it in items if "CYLINDER" in getattr(it, "geom_type", "")]
+        if t == "circular":
+            return [it for it in items if "CIRCLE" in getattr(it, "geom_type", "")]
+        if t == "linear":
+            return [it for it in items if "LINE" in getattr(it, "geom_type", "")]
+        if t == "spherical":
+            return [it for it in items if "SPHERE" in getattr(it, "geom_type", "")]
+        if t == "conical":
+            return [it for it in items if "CONE" in getattr(it, "geom_type", "")]
+        if t == "toroidal":
+            return [it for it in items if "TORUS" in getattr(it, "geom_type", "")]
+        return []
+
+    def describe(self) -> str:
+        return f":{self.tag}"
+
+
+class NumericCompareFilter(Filter):
+    """metric == val, metric > val, etc."""
+
+    def __init__(self, metric: str, op: str, value: float, tolerance: float = 1e-4):
+        self.metric = METRIC_ALIASES.get(metric.lower(), metric.lower())
+        self.op = op
+        self.value = value
+        self.tolerance = tolerance
+
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
+        res = []
+        for it in items:
+            try:
+                v = it.metric(self.metric)
+            except (KeyError, AttributeError):
+                continue
+            if not math.isfinite(v):
+                continue
+            if self.op == "==" and abs(v - self.value) <= self.tolerance:
+                res.append(it)
+            elif self.op == "!=" and abs(v - self.value) > self.tolerance:
+                res.append(it)
+            elif self.op == ">" and v > self.value + self.tolerance:
+                res.append(it)
+            elif self.op == ">=" and v >= self.value - self.tolerance:
+                res.append(it)
+            elif self.op == "<" and v < self.value - self.tolerance:
+                res.append(it)
+            elif self.op == "<=" and v <= self.value + self.tolerance:
+                res.append(it)
+        return res
+
+    def describe(self) -> str:
+        return f"{self.metric} {self.op} {self.value}"
+
+
+class NumericRangeFilter(Filter):
+    """min_val <= metric <= max_val or metric in [min_val, max_val]."""
+
+    def __init__(self, metric: str, min_val: float, max_val: float, tolerance: float = 1e-4):
+        self.metric = METRIC_ALIASES.get(metric.lower(), metric.lower())
+        self.min_val = min_val
+        self.max_val = max_val
+        self.tolerance = tolerance
+
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
+        res = []
+        for it in items:
+            try:
+                v = it.metric(self.metric)
+            except (KeyError, AttributeError):
+                continue
+            if math.isfinite(v) and (self.min_val - self.tolerance <= v <= self.max_val + self.tolerance):
+                res.append(it)
+        return res
+
+    def describe(self) -> str:
+        return f"{self.min_val} <= {self.metric} <= {self.max_val}"
+
+
+class SubnameFilter(Filter):
+    """Matches a specific subelement name like Face1, Edge2, Vertex3."""
+
+    def __init__(self, target_subname: str):
+        self.target_subname = target_subname
+
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
+        return [it for it in items if it.subname.lower() == self.target_subname.lower()]
+
+    def describe(self) -> str:
+        return self.target_subname
+
+
+class AdjacentFilter(Filter):
+    """adjacent_to(sub_expression): elements touching/sharing topology with reference."""
+
+    def __init__(self, target_expr: str, tolerance: float = 1e-4):
+        self.target_expr = target_expr
+        self.tolerance = tolerance
+
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
+        if not items:
+            return []
+        base_obj = items[0].base_obj
+        if base_obj is None:
+            return list(items)
+
+        ref_kind = None
+        m_sub = re.match(r"^(Face|Edge|Vertex)\d+$", self.target_expr.strip(), re.IGNORECASE)
+        if m_sub:
+            ref_kind = m_sub.group(1).capitalize()
+
+        ref_items = evaluate_expression_items(base_obj, self.target_expr, kind=ref_kind, tolerance=self.tolerance)
+        if not ref_items:
+            return []
+        ref_shapes = [ri.shape for ri in ref_items if ri.shape is not None]
+        ref_subnames = {ri.subname.lower() for ri in ref_items}
+
+        matched = []
+        for it in items:
+            if it.shape is None:
+                continue
+            if it.subname.lower() in ref_subnames:
+                continue
+            for rs in ref_shapes:
+                try:
+                    if hasattr(it.shape, "distToShape"):
+                        dist, _pts, _sol = it.shape.distToShape(rs)
+                        if dist <= self.tolerance:
+                            matched.append(it)
+                            break
+                    elif hasattr(rs, "isSame") and (rs.isSame(it.shape) or rs.isPartner(it.shape)):
+                        matched.append(it)
+                        break
+                except Exception:
+                    continue
+        return matched
+
+    def describe(self) -> str:
+        return f"adjacent_to({self.target_expr})"
+
+
+class CoplanarFilter(Filter):
+    """coplanar_to(sub_expression): planar faces coplanar with reference face(s)."""
+
+    def __init__(self, target_expr: str, tolerance: float = 1e-4):
+        self.target_expr = target_expr
+        self.tolerance = tolerance
+
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
+        if not items:
+            return []
+        base_obj = items[0].base_obj
+        if base_obj is None:
+            return list(items)
+
+        ref_kind = "Face"
+        m_sub = re.match(r"^(Face|Edge|Vertex)\d+$", self.target_expr.strip(), re.IGNORECASE)
+        if m_sub:
+            ref_kind = m_sub.group(1).capitalize()
+
+        ref_items = evaluate_expression_items(base_obj, self.target_expr, kind=ref_kind, tolerance=self.tolerance)
+        planes = []
+        for ri in ref_items:
+            if ri.normal is not None:
+                planes.append((ri.center_tuple, ri.normal))
+        if not planes:
+            return []
+
+        matched = []
+        for it in items:
+            if it.kind != "Face" or it.normal is None:
+                continue
+            for pt, norm in planes:
+                dot = abs(_dot(it.normal, norm))
+                if abs(dot - 1.0) <= self.tolerance:
+                    c = it.center_tuple
+                    dist = abs((c[0] - pt[0]) * norm[0] + (c[1] - pt[1]) * norm[1] + (c[2] - pt[2]) * norm[2])
+                    if dist <= self.tolerance:
+                        matched.append(it)
+                        break
+        return matched
+
+    def describe(self) -> str:
+        return f"coplanar_to({self.target_expr})"
+
+
+class CoaxialFilter(Filter):
+    """coaxial_to(sub_expression): cylinders/circles sharing central axis."""
+
+    def __init__(self, target_expr: str, tolerance: float = 1e-4):
+        self.target_expr = target_expr
+        self.tolerance = tolerance
+
+    def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
+        if not items:
+            return []
+        base_obj = items[0].base_obj
+        if base_obj is None:
+            return list(items)
+
+        ref_kind = None
+        m_sub = re.match(r"^(Face|Edge|Vertex)\d+$", self.target_expr.strip(), re.IGNORECASE)
+        if m_sub:
+            ref_kind = m_sub.group(1).capitalize()
+
+        ref_items = evaluate_expression_items(base_obj, self.target_expr, kind=ref_kind, tolerance=self.tolerance)
+        axes = []
+        for ri in ref_items:
+            ad = getattr(ri, "axis_direction", None)
+            ap = getattr(ri, "axis_point", None) or ri.center
+            if ad is not None:
+                axes.append(((float(ad.x), float(ad.y), float(ad.z)), (float(ap.x), float(ap.y), float(ap.z))))
+        if not axes:
+            return []
+
+        matched = []
+        for it in items:
+            iad = getattr(it, "axis_direction", None)
+            iap = getattr(it, "axis_point", None) or it.center
+            if iad is None:
+                continue
+            d_it = (float(iad.x), float(iad.y), float(iad.z))
+            p_it = (float(iap.x), float(iap.y), float(iap.z))
+            for d_ref, p_ref in axes:
+                dot = abs(_dot(d_it, d_ref))
+                if abs(dot - 1.0) <= self.tolerance:
+                    delta = (p_it[0] - p_ref[0], p_it[1] - p_ref[1], p_it[2] - p_ref[2])
+                    cross_d = _cross(delta, d_ref)
+                    if _length(cross_d) <= self.tolerance:
+                        matched.append(it)
+                        break
+        return matched
+
+    def describe(self) -> str:
+        return f"coaxial_to({self.target_expr})"
 
 
 class NamedViewFilter(Filter):
@@ -466,6 +716,9 @@ def _tokenize_filter(expr: str) -> list[str]:
         ("NUMBER", r"-?\d+(?:\.\d+)?"),
         ("AXIS_VEC", r"\([+-]?\d+(?:\.\d+)?\s*,\s*[+-]?\d+(?:\.\d+)?\s*,\s*[+-]?\d+(?:\.\d+)?\)"),
         ("OP2", r">>|<<"),
+        ("COMP_OP", r"==|!=|<=|>=|<|>"),
+        ("TAG", r":[A-Za-z_][A-Za-z0-9_]*"),
+        ("SLICE_COLON", r":"),
         ("OP1", r"[><|#%+\-]"),
         ("WORD", r"[A-Za-z_][A-Za-z0-9_]*"),
         ("LBRACK", r"\["),
@@ -493,7 +746,7 @@ def _tokenize_filter(expr: str) -> list[str]:
     return tokens
 
 
-def _parse_filter_atom(tokens: list[str], idx: int) -> tuple[Filter, int]:
+def _parse_filter_atom(tokens: list[str], idx: int, tolerance: float = 1e-4) -> tuple[Filter, int]:
     """Parse a primary filter atom from tokens[idx:]."""
     if idx >= len(tokens):
         raise ValueError("Unexpected end of expression")
@@ -502,7 +755,7 @@ def _parse_filter_atom(tokens: list[str], idx: int) -> tuple[Filter, int]:
 
     # Parenthesized subexpression: ( ... )
     if tok == "(":
-        inner, next_idx = _parse_filter_or(tokens, idx + 1)
+        inner, next_idx = _parse_filter_or(tokens, idx + 1, tolerance=tolerance)
         if next_idx < len(tokens) and tokens[next_idx] == ")":
             next_idx += 1
         return inner, next_idx
@@ -516,8 +769,41 @@ def _parse_filter_atom(tokens: list[str], idx: int) -> tuple[Filter, int]:
             next_idx += 1
         if next_idx < len(tokens):
             next_idx += 1
-        inner_filter, _ = _parse_filter_or(str_tokens, 0)
+        inner_filter, _ = _parse_filter_or(str_tokens, 0, tolerance=tolerance)
         return inner_filter, next_idx
+
+    # Topological & Convexity Tags: :concave, :convex, :smooth, etc.
+    if tok.startswith(":"):
+        return TagFilter(tok[1:]), idx + 1
+
+    # Combinators: adjacent_to(...), coplanar_to(...), coaxial_to(...)
+    if tok.lower() in ("adjacent_to", "coplanar_to", "coaxial_to"):
+        comb_name = tok.lower()
+        next_idx = idx + 1
+        if next_idx < len(tokens) and tokens[next_idx] == "(":
+            next_idx += 1
+            inner_tokens = []
+            depth = 1
+            while next_idx < len(tokens):
+                t = tokens[next_idx]
+                if t == "(":
+                    depth += 1
+                elif t == ")":
+                    depth -= 1
+                    if depth == 0:
+                        next_idx += 1
+                        break
+                inner_tokens.append(t)
+                next_idx += 1
+            inner_expr = " ".join(inner_tokens)
+            if (inner_expr.startswith('"') and inner_expr.endswith('"')) or (inner_expr.startswith("'") and inner_expr.endswith("'")):
+                inner_expr = inner_expr[1:-1].strip()
+            if comb_name == "adjacent_to":
+                return AdjacentFilter(inner_expr, tolerance=tolerance), next_idx
+            if comb_name == "coplanar_to":
+                return CoplanarFilter(inner_expr, tolerance=tolerance), next_idx
+            if comb_name == "coaxial_to":
+                return CoaxialFilter(inner_expr, tolerance=tolerance), next_idx
 
     # Named views
     if tok.lower() in ("top", "bottom", "front", "back", "left", "right"):
@@ -533,10 +819,65 @@ def _parse_filter_atom(tokens: list[str], idx: int) -> tuple[Filter, int]:
     if tok.startswith("%") and len(tok) > 1:
         return TypeFilter(tok[1:]), idx + 1
 
+    # Numeric range comparisons: min_val <= metric <= max_val or min_val < metric < max_val
+    if re.match(r"^-?\d+(?:\.\d+)?$", tok) and idx + 4 < len(tokens) and tokens[idx+1] in ("<", "<=") and tokens[idx+3] in ("<", "<="):
+        min_v = float(tok)
+        metric_tok = tokens[idx+2]
+        max_v = float(tokens[idx+4])
+        return NumericRangeFilter(metric_tok, min_v, max_v), idx + 5
+
+    # Numeric comparisons: metric == value, metric > value, metric in [min, max]
+    norm_metric = METRIC_ALIASES.get(tok.lower(), tok.lower())
+    if norm_metric in KNOWN_METRICS or tok.lower() in KNOWN_METRICS:
+        if idx + 2 < len(tokens) and tokens[idx+1] in ("==", "!=", "<", "<=", ">", ">="):
+            op = tokens[idx+1]
+            try:
+                val = float(tokens[idx+2])
+                return NumericCompareFilter(norm_metric, op, val, tolerance=tolerance), idx + 3
+            except ValueError:
+                pass
+        if idx + 5 < len(tokens) and tokens[idx+1].lower() == "in" and tokens[idx+2] == "[":
+            try:
+                min_v = float(tokens[idx+3])
+                max_v = float(tokens[idx+5])
+                next_i = idx + 6
+                if next_i < len(tokens) and tokens[next_i] == "]":
+                    next_i += 1
+                return NumericRangeFilter(norm_metric, min_v, max_v), next_i
+            except ValueError:
+                pass
+
+    # Universal Metric Clustering (>>metric[slice] or <<metric[slice])
+    if tok in (">>=", ">>", "<<") or tok.startswith((">>", "<<")):
+        op = ">>" if tok.startswith(">>") else "<<"
+        remainder = tok[2:].strip()
+        if remainder:
+            target_metric = remainder
+            idx += 1
+        else:
+            idx += 1
+            if idx >= len(tokens):
+                raise ValueError(f"Expected metric or axis after {op}")
+            target_metric = tokens[idx]
+            idx += 1
+
+        selector_str = "0"
+        if idx < len(tokens) and tokens[idx] == "[":
+            idx += 1
+            bracket_tokens = []
+            while idx < len(tokens) and tokens[idx] != "]":
+                bracket_tokens.append(tokens[idx])
+                idx += 1
+            if idx < len(tokens) and tokens[idx] == "]":
+                idx += 1
+            selector_str = "".join(bracket_tokens)
+
+        return MetricClusterFilter(target_metric, selector_str, is_descending=(op == ">>"), tolerance=tolerance), idx
+
     # Direction / Extrema / Parallel / Perpendicular operators
-    # Cases: >Z, <Z, >>Z, <<Z, |Z, #Z, +Z, -Z
+    # Cases: >Z, <Z, |Z, #Z, +Z, -Z
     op = ""
-    if tok in (">", "<", ">>", "<<", "|", "#", "+", "-"):
+    if tok in (">", "<", "|", "#", "+", "-"):
         op = tok
         idx += 1
         if idx >= len(tokens):
@@ -545,7 +886,7 @@ def _parse_filter_atom(tokens: list[str], idx: int) -> tuple[Filter, int]:
         idx += 1
     else:
         # Check combined token like ">Z" or "|X" or "+Z"
-        m = re.match(r"^(>>|<<|[><|#+\-])(.*)$", tok)
+        m = re.match(r"^([><|#+\-])(.*)$", tok)
         if m:
             op = m.group(1)
             axis_tok = m.group(2)
@@ -560,11 +901,16 @@ def _parse_filter_atom(tokens: list[str], idx: int) -> tuple[Filter, int]:
                 axis_tok = tok
                 idx += 1
             else:
+                # Subelement name token: Face1, Edge4, Vertex2
+                subname_match = re.match(r"^(Face|Edge|Vertex)(\d+)$", tok, re.IGNORECASE)
+                if subname_match:
+                    sub_name = f"{subname_match.group(1).capitalize()}{subname_match.group(2)}"
+                    return SubnameFilter(sub_name), idx + 1
                 raise ValueError(f"Unrecognized selector token: {tok!r}")
 
     vec = parse_vector(axis_tok)
 
-    # Check for optional [index] e.g. >Z[0] or >>Z[-1]
+    # Check for optional [index] e.g. >Z[0] or >Z[-1]
     index_val: Optional[int] = None
     if idx < len(tokens) and tokens[idx] == "[":
         idx += 1
@@ -578,17 +924,13 @@ def _parse_filter_atom(tokens: list[str], idx: int) -> tuple[Filter, int]:
             idx += 1
 
     if index_val is not None:
-        is_max = op in (">", ">>", "+")
+        is_max = op in (">", "+")
         return CenterNthFilter(vec, index_val, is_max=is_max), idx
 
     if op == ">":
         return DirectionMinMaxFilter(vec, is_max=True), idx
     if op == "<":
         return DirectionMinMaxFilter(vec, is_max=False), idx
-    if op == ">>":
-        return CenterNthFilter(vec, 0, is_max=True), idx
-    if op == "<<":
-        return CenterNthFilter(vec, 0, is_max=False), idx
     if op == "+":
         return DirectionFilter(vec), idx
     if op == "-":
@@ -602,44 +944,44 @@ def _parse_filter_atom(tokens: list[str], idx: int) -> tuple[Filter, int]:
     return DirectionMinMaxFilter(vec, is_max=True), idx
 
 
-def _parse_filter_not(tokens: list[str], idx: int) -> tuple[Filter, int]:
+def _parse_filter_not(tokens: list[str], idx: int, tolerance: float = 1e-4) -> tuple[Filter, int]:
     """Parse 'not' unary operator."""
     if idx < len(tokens) and tokens[idx].lower() == "not":
-        child, next_idx = _parse_filter_not(tokens, idx + 1)
+        child, next_idx = _parse_filter_not(tokens, idx + 1, tolerance=tolerance)
         return NotFilter(child), next_idx
-    return _parse_filter_atom(tokens, idx)
+    return _parse_filter_atom(tokens, idx, tolerance=tolerance)
 
 
-def _parse_filter_and(tokens: list[str], idx: int) -> tuple[Filter, int]:
+def _parse_filter_and(tokens: list[str], idx: int, tolerance: float = 1e-4) -> tuple[Filter, int]:
     """Parse 'and' / '&' / '+' intersection."""
-    left, idx = _parse_filter_not(tokens, idx)
+    left, idx = _parse_filter_not(tokens, idx, tolerance=tolerance)
     while idx < len(tokens):
         op = tokens[idx].lower()
         if op in ("and", "&") or (op == "+" and idx + 1 < len(tokens) and tokens[idx + 1] in (">", "<", "|", "#", "%")):
-            right, idx = _parse_filter_not(tokens, idx + 1)
+            right, idx = _parse_filter_not(tokens, idx + 1, tolerance=tolerance)
             left = AndFilter(left, right)
         elif op in ("exc", "except"):
-            right, idx = _parse_filter_not(tokens, idx + 1)
+            right, idx = _parse_filter_not(tokens, idx + 1, tolerance=tolerance)
             left = ExceptFilter(left, right)
         else:
             break
     return left, idx
 
 
-def _parse_filter_or(tokens: list[str], idx: int) -> tuple[Filter, int]:
+def _parse_filter_or(tokens: list[str], idx: int, tolerance: float = 1e-4) -> tuple[Filter, int]:
     """Parse 'or' / '|' union."""
-    left, idx = _parse_filter_and(tokens, idx)
+    left, idx = _parse_filter_and(tokens, idx, tolerance=tolerance)
     while idx < len(tokens):
         op = tokens[idx].lower()
         if op == "or" or (op == "|" and idx + 1 < len(tokens) and tokens[idx + 1] not in STANDARD_AXES):
-            right, idx = _parse_filter_and(tokens, idx + 1)
+            right, idx = _parse_filter_and(tokens, idx + 1, tolerance=tolerance)
             left = OrFilter(left, right)
         else:
             break
     return left, idx
 
 
-def parse_filter_string(expr: str) -> Filter:
+def parse_filter_string(expr: str, tolerance: float = 1e-4) -> Filter:
     """Parse a boolean CadQuery filter string into a Filter object."""
     clean = expr.strip()
     if not clean:
@@ -647,11 +989,11 @@ def parse_filter_string(expr: str) -> Filter:
     tokens = _tokenize_filter(clean)
     if not tokens:
         return Filter()
-    flt, _ = _parse_filter_or(tokens, 0)
+    flt, _ = _parse_filter_or(tokens, 0, tolerance=tolerance)
     return flt
 
 
-def parse_expression(expr_str: str, default_kind: str = "Face") -> ExpressionPipeline:
+def parse_expression(expr_str: str, default_kind: str = "Face", tolerance: float = 1e-4) -> ExpressionPipeline:
     """Parse a full CadQuery selector expression (including method chaining).
 
     Supports:
@@ -690,7 +1032,7 @@ def parse_expression(expr_str: str, default_kind: str = "Face") -> ExpressionPip
         elif depth == 0 and c == '.' and not (i > 0 and clean[i-1].isdigit() and i + 1 < len(clean) and clean[i+1].isdigit()):
             stages.append("".join(current).strip())
             current = []
-        elif depth == 0 and clean[i:i+2] in ("->", ">>"):
+        elif depth == 0 and clean[i:i+2] == "->":
             stages.append("".join(current).strip())
             current = []
             i += 1  # Skip second character
@@ -707,19 +1049,26 @@ def parse_expression(expr_str: str, default_kind: str = "Face") -> ExpressionPip
             continue
         # Check method call: faces(...) or edges(...)
         match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)$", stage, re.DOTALL)
-        if match:
+        if match and match.group(1).lower() in KINDS_MAP:
             method_name = match.group(1).lower()
             inner_arg = match.group(2).strip()
             # Strip enclosing quotes if present
             if (inner_arg.startswith('"') and inner_arg.endswith('"')) or (inner_arg.startswith("'") and inner_arg.endswith("'")):
                 inner_arg = inner_arg[1:-1].strip()
             kind = KINDS_MAP.get(method_name, method_name.capitalize())
-            filter_obj = parse_filter_string(inner_arg) if inner_arg else None
+            filter_obj = parse_filter_string(inner_arg, tolerance=tolerance) if inner_arg else None
             steps.append(PipelineStep(kind, filter_obj))
         else:
-            # Standalone filter expression without method name
-            filter_obj = parse_filter_string(stage)
-            steps.append(PipelineStep(default_kind, filter_obj))
+            # Check bare subelement name: Face1, Edge2, Vertex3
+            match_sub = re.match(r"^(Face|Edge|Vertex)(\d+)$", stage.strip(), re.IGNORECASE)
+            if match_sub:
+                inferred_kind = match_sub.group(1).capitalize()
+                sub_name = f"{inferred_kind}{match_sub.group(2)}"
+                steps.append(PipelineStep(inferred_kind, SubnameFilter(sub_name)))
+            else:
+                # Standalone filter expression without method name
+                filter_obj = parse_filter_string(stage, tolerance=tolerance)
+                steps.append(PipelineStep(default_kind, filter_obj))
 
     return ExpressionPipeline(steps)
 
@@ -747,7 +1096,12 @@ def _extract_subshapes(shape: Any, kind: str) -> list[Any]:
     return [shape]
 
 
-def evaluate_expression_items(obj: Any, expr_str: str, kind: Optional[str] = None) -> list[EvaluatorItem]:
+def evaluate_expression_items(
+    obj: Any,
+    expr_str: str,
+    kind: Optional[str] = None,
+    tolerance: float = 1e-4,
+) -> list[EvaluatorItem]:
     """Evaluate expression against obj and return list of EvaluatorItem."""
     if isinstance(obj, (list, tuple)):
         if not obj:
@@ -771,20 +1125,26 @@ def evaluate_expression_items(obj: Any, expr_str: str, kind: Optional[str] = Non
         return []
 
     default_kind = kind or "Face"
-    pipeline = parse_expression(expr_str, default_kind=default_kind)
+    pipeline = parse_expression(expr_str, default_kind=default_kind, tolerance=tolerance)
     if not pipeline.steps:
         # Empty expression returns all items of default kind
-        raw = _extract_subshapes(shape, default_kind)
-        return [EvaluatorItem(s, f"{default_kind}{idx+1}", default_kind, obj) for idx, s in enumerate(raw)]
+        try:
+            return candidates(obj, default_kind)
+        except Exception:
+            raw = _extract_subshapes(shape, default_kind)
+            return [EvaluatorItem(s, f"{default_kind}{idx+1}", default_kind, obj) for idx, s in enumerate(raw)]
 
     current_items: list[EvaluatorItem] = []
     for step_idx, step in enumerate(pipeline.steps):
         if step_idx == 0:
-            raw_subshapes = _extract_subshapes(shape, step.kind)
-            current_items = [
-                EvaluatorItem(s, f"{step.kind}{idx+1}", step.kind, obj)
-                for idx, s in enumerate(raw_subshapes)
-            ]
+            try:
+                current_items = candidates(obj, step.kind)
+            except Exception:
+                raw_subshapes = _extract_subshapes(shape, step.kind)
+                current_items = [
+                    EvaluatorItem(s, f"{step.kind}{idx+1}", step.kind, obj)
+                    for idx, s in enumerate(raw_subshapes)
+                ]
         else:
             # Descend from previous matching shapes to their child subshapes
             next_raw: list[Any] = []
@@ -792,15 +1152,27 @@ def evaluate_expression_items(obj: Any, expr_str: str, kind: Optional[str] = Non
                 for sub in _extract_subshapes(item.shape, step.kind):
                     next_raw.append(sub)
 
-            # Map child subshapes to base object subname indices via OCC isSame identity
-            all_base = _extract_subshapes(shape, step.kind)
+            # Map child subshapes to base object candidates or subname indices
+            try:
+                base_cands = candidates(obj, step.kind)
+            except Exception:
+                base_cands = []
+
             de_duped: list[EvaluatorItem] = []
             seen_indices = set()
-            for sub in next_raw:
-                matched_idx = next((i for i, b in enumerate(all_base) if b.isSame(sub)), None)
-                if matched_idx is not None and matched_idx not in seen_indices:
-                    seen_indices.add(matched_idx)
-                    de_duped.append(EvaluatorItem(sub, f"{step.kind}{matched_idx+1}", step.kind, obj))
+            if base_cands:
+                for sub in next_raw:
+                    matched = next((b for b in base_cands if b.shape is not None and b.shape.isSame(sub)), None)
+                    if matched is not None and matched.subname not in seen_indices:
+                        seen_indices.add(matched.subname)
+                        de_duped.append(matched)
+            else:
+                all_base = _extract_subshapes(shape, step.kind)
+                for sub in next_raw:
+                    matched_idx = next((i for i, b in enumerate(all_base) if b.isSame(sub)), None)
+                    if matched_idx is not None and matched_idx not in seen_indices:
+                        seen_indices.add(matched_idx)
+                        de_duped.append(EvaluatorItem(sub, f"{step.kind}{matched_idx+1}", step.kind, obj))
             current_items = de_duped
 
         if step.filter_obj:
@@ -809,9 +1181,14 @@ def evaluate_expression_items(obj: Any, expr_str: str, kind: Optional[str] = Non
     return current_items
 
 
-def evaluate_expression(obj: Any, expr_str: str, kind: Optional[str] = None) -> list[FeatureRef]:
+def evaluate_expression(
+    obj: Any,
+    expr_str: str,
+    kind: Optional[str] = None,
+    tolerance: float = 1e-4,
+) -> list[FeatureRef]:
     """Evaluate expression against obj and return list of FeatureRef."""
-    items = evaluate_expression_items(obj, expr_str, kind)
+    items = evaluate_expression_items(obj, expr_str, kind, tolerance=tolerance)
     obj_name = getattr(obj, "Name", "") if hasattr(obj, "Name") else ""
     return [FeatureRef(obj_name, item.subname, item.kind) for item in items]
 
@@ -828,12 +1205,19 @@ FAST_DISCRIMINATORS = [
     "+Z", "-Z", "+X", "-X", "+Y", "-Y",
     "|Z", "|X", "|Y",
     "#Z", "#X", "#Y",
+    # Tags & Geometric Classes
+    ":planar", ":cylindrical", ":circular", ":linear",
+    ":concave", ":convex", ":smooth", ":closed", ":boundary", ":hole",
+    # Cluster / Metric Extrema
+    ">>radius[0]", "<<radius[0]",
+    ">>length[0]", "<<length[0]",
+    ">>area[0]", "<<area[0]",
     # Types
     "%Plane", "%Cylinder", "%Line", "%Circle", "%Sphere", "%Cone",
     # Combined filters
-    ">Z and %Plane", "<Z and %Plane",
+    ">Z and :planar", "<Z and :planar",
     "|Z and >Y", "|Z and <Y", "|Z and >X", "|Z and <X",
-    "|Z and %Cylinder",
+    "|Z and :cylindrical",
 ]
 
 
@@ -876,18 +1260,32 @@ def autocomplete_at_cursor(
     if chain_prefix_match:
         parent_expr = chain_prefix_match.group(1)
         parent_items = evaluate_expression_items(obj, parent_expr)
-        pool: list[EvaluatorItem] = []
+        pool = []
+        try:
+            from .fs_selector import candidates
+            base_cands = candidates(obj, scope_kind)
+        except Exception:
+            base_cands = []
         all_target_kind_shapes = _extract_subshapes(base_shape, scope_kind)
         seen_indices = set()
         for p in parent_items:
             for s in _extract_subshapes(p.shape, scope_kind):
-                idx = next((i for i, b in enumerate(all_target_kind_shapes) if b.isSame(s)), None)
-                if idx is not None and idx not in seen_indices:
-                    seen_indices.add(idx)
-                    pool.append(EvaluatorItem(s, f"{scope_kind}{idx+1}", scope_kind, obj))
+                matched = next((b for b in base_cands if b.shape is not None and b.shape.isSame(s)), None) if base_cands else None
+                if matched is not None and matched.subname not in seen_indices:
+                    seen_indices.add(matched.subname)
+                    pool.append(matched)
+                elif matched is None:
+                    idx = next((i for i, b in enumerate(all_target_kind_shapes) if b.isSame(s)), None)
+                    if idx is not None and idx not in seen_indices:
+                        seen_indices.add(idx)
+                        pool.append(EvaluatorItem(s, f"{scope_kind}{idx+1}", scope_kind, obj))
     else:
-        raw = _extract_subshapes(base_shape, scope_kind)
-        pool = [EvaluatorItem(s, f"{scope_kind}{idx+1}", scope_kind, obj) for idx, s in enumerate(raw)]
+        try:
+            from .fs_selector import candidates
+            pool = candidates(obj, scope_kind)
+        except Exception:
+            raw = _extract_subshapes(base_shape, scope_kind)
+            pool = [EvaluatorItem(s, f"{scope_kind}{idx+1}", scope_kind, obj) for idx, s in enumerate(raw)]
 
     # 2. Test fast discriminators on the current pool
     best_candidate: Optional[str] = None

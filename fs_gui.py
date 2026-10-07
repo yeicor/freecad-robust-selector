@@ -115,13 +115,21 @@ PRESETS: list[tuple[str, str]] = [
     ("Perpendicular to Z (#Z)", "#Z"),
     ("Normal pointing +Z (+Z)", "+Z"),
     ("Normal pointing -Z (-Z)", "-Z"),
+    ("Planar Faces (:planar)", ":planar"),
+    ("Cylindrical Faces (:cylindrical)", ":cylindrical"),
+    ("All Internal Fillet Edges (Concave)", ":concave"),
+    ("All External Chamfer Edges (Convex)", ":convex"),
+    ("All Smooth / Tangent Edges", ":smooth"),
+    ("Holes by Diameter (M3-M8 Range)", "3.0 <= diameter <= 8.0"),
+    ("Largest Radius (>>radius[0])", ">>radius[0]"),
+    ("Smallest Radius (<<radius[0])", "<<radius[0]"),
+    ("Longest Edges (>>length[0])", ">>length[0]"),
+    ("Edges of Top Face (faces('>Z').edges())", 'faces(">Z").edges()'),
+    ("Adjacent to Face 1 (adjacent_to('Face1'))", 'adjacent_to("Face1")'),
+    ("Linear Edges (:linear)", ":linear"),
+    ("Circular Edges (:circular)", ":circular"),
     ("Planar Faces (%Plane)", "%Plane"),
     ("Cylindrical Faces (%Cylinder)", "%Cylinder"),
-    ("Linear Edges (%Line)", "%Line"),
-    ("Circular Edges (%Circle)", "%Circle"),
-    ("Edges of Top Face (faces('>Z').edges())", 'faces(">Z").edges()'),
-    ("Edges of Top Face Left (faces('>Z').edges('<X'))", 'faces(">Z").edges("<X")'),
-    ("Vertices of Top Face (faces('>Z').vertices())", 'faces(">Z").vertices()'),
     ("Intersection (and)", " and "),
     ("Union (or)", " or "),
     ("Negation (not)", "not "),
@@ -129,23 +137,124 @@ PRESETS: list[tuple[str, str]] = [
 ]
 
 
-# Lightweight compatibility shim for StepRow
-class StepRow(QtWidgets.QWidget):
-    changed = QtCore.Signal()
-    move_requested = QtCore.Signal(int)
-    remove_requested = QtCore.Signal()
-    insert_requested = QtCore.Signal()
+class ExpressionHighlighter(QtGui.QSyntaxHighlighter):
+    """Real-time syntax highlighter for CadQuery selector expressions."""
 
-    def __init__(self, step: Any = None, index: int = 0, parent: Optional[QtWidgets.QWidget] = None):
+    def __init__(self, parent: QtGui.QTextDocument):
         super().__init__(parent)
-        self.step = step or Step("extreme", {"metric": "z", "direction": "max"})
-        self.index = index
-        self.force = QtWidgets.QCheckBox()
-        self.remove_btn = QtWidgets.QPushButton()
-        self.remove_btn.clicked.connect(self.remove_requested)
+        self._rules: list[tuple[QtCore.QRegularExpression, QtGui.QTextCharFormat]] = []
+        self._init_rules()
 
-    def current_step(self) -> Step:
-        return self.step
+    def _init_rules(self):
+        def _fmt(color: str, bold: bool = False, italic: bool = False) -> QtGui.QTextCharFormat:
+            f = QtGui.QTextCharFormat()
+            f.setForeground(QtGui.QColor(color))
+            if bold:
+                f.setFontWeight(QtGui.QFont.Weight.Bold)
+            if italic:
+                f.setFontItalic(True)
+            return f
+
+        # Methods / kinds: faces, edges, vertices, wires, solids
+        self._rules.append((QtCore.QRegularExpression(r"\b(faces|edges|vertices|wires|solids)\b"), _fmt("#0277bd", bold=True)))
+
+        # Relational combinators: adjacent_to, coplanar_to, coaxial_to
+        self._rules.append((QtCore.QRegularExpression(r"\b(adjacent_to|coplanar_to|coaxial_to)\b"), _fmt("#00838f", bold=True)))
+
+        # Tags: :concave, :convex, :smooth, :closed, :boundary, :hole, :planar, etc.
+        self._rules.append((QtCore.QRegularExpression(r":[A-Za-z_][A-Za-z0-9_]*"), _fmt("#2e7d32", bold=True)))
+
+        # Canonical Clusters & Extrema: >>Z, <<Z, >>radius[0], <<length[0:2], >Z, <Z, |Z, #Z, +Z, -Z, %Type
+        self._rules.append((QtCore.QRegularExpression(r"(>>|<<)[A-Za-z0-9_]+(\[[^\]]*\])?"), _fmt("#6a1b9a", bold=True)))
+        self._rules.append((QtCore.QRegularExpression(r"[><|#\+\-][XYZxyz]"), _fmt("#7b1fa2", bold=True)))
+        self._rules.append((QtCore.QRegularExpression(r"%[A-Za-z]+"), _fmt("#ad1457", bold=True)))
+
+        # Logical operators: and, or, not, exc, in
+        self._rules.append((QtCore.QRegularExpression(r"\b(and|or|not|exc|in)\b"), _fmt("#c2185b", bold=True)))
+
+        # Metrics: radius, length, area, volume, distance, perimeter, x, y, z
+        self._rules.append((QtCore.QRegularExpression(r"\b(radius|rad|length|len|area|volume|vol|distance|dist|perimeter|perim|diameter|[xyzXYZ])\b"), _fmt("#1565c0")))
+
+        # Comparisons: ==, !=, <=, >=, <, >
+        self._rules.append((QtCore.QRegularExpression(r"(==|!=|<=|>=|<|>)"), _fmt("#e65100", bold=True)))
+
+        # Numbers
+        self._rules.append((QtCore.QRegularExpression(r"\b[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?\b"), _fmt("#ef6c00")))
+
+        # Quoted strings
+        self._rules.append((QtCore.QRegularExpression(r"\"[^\"]*\"|'[^']*'"), _fmt("#558b2f", italic=True)))
+
+    def highlightBlock(self, text: str):
+        for pattern, fmt in self._rules:
+            match_iter = pattern.globalMatch(text)
+            while match_iter.hasNext():
+                match = match_iter.next()
+                self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
+
+
+class ExpressionEditor(QtWidgets.QPlainTextEdit):
+    """QPlainTextEdit with syntax highlighting and Tab-based auto-completion."""
+
+    TAB_COMPLETIONS = [
+        # Tags
+        (":conca", ":concave"),
+        (":conve", ":convex"),
+        (":con", ":concave"),
+        (":smo", ":smooth"),
+        (":clo", ":closed"),
+        (":boun", ":boundary"),
+        (":hol", ":hole"),
+        (":pla", ":planar"),
+        (":cyl", ":cylindrical"),
+        (":cir", ":circular"),
+        (":lin", ":linear"),
+        # Methods
+        ("fac", 'faces("'),
+        ("edg", 'edges("'),
+        ("ver", 'vertices("'),
+        ("wir", 'wires("'),
+        # Extrema & Clusters
+        (">>rad", ">>radius[0]"),
+        ("<<rad", "<<radius[0]"),
+        (">>len", ">>length[0]"),
+        ("<<len", "<<length[0]"),
+        (">>ar", ">>area[0]"),
+        ("<<ar", "<<area[0]"),
+        # Combinators
+        ("adj", 'adjacent_to("'),
+        ("cop", 'coplanar_to("'),
+        ("coa", 'coaxial_to("'),
+    ]
+
+    def __init__(self, panel: Optional[Any] = None, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.panel = panel
+        self.highlighter = ExpressionHighlighter(self.document())
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        key = event.key()
+        key_tab = getattr(QtCore.Qt.Key, "Key_Tab", 0x01000001)
+        if key == key_tab:
+            cursor = self.textCursor()
+            pos = cursor.position()
+            text = self.toPlainText()
+            prefix = text[:pos]
+
+            # 1. Check dictionary tab completions
+            for token, full in self.TAB_COMPLETIONS:
+                if prefix.endswith(token):
+                    cursor.setPosition(pos - len(token), QtGui.QTextCursor.MoveMode.KeepAnchor)
+                    cursor.insertText(full)
+                    self.setTextCursor(cursor)
+                    return
+
+            # 2. If at empty string or empty argument: trigger smart autocomplete from panel
+            if self.panel and (not text.strip() or prefix.endswith('("') or prefix.endswith("('")):
+                self.panel.autocomplete_in_cursor()
+                return
+
+            return  # Swallow Tab without inserting literal indentation
+        super().keyPressEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +285,7 @@ class FeatureSelectorPanel:
         self._dialog_open: bool = False
         self._plan_generation: int = 0
         self._plan_task: Any = None
-        self._routes_complete: bool = True
+        self.tolerance: float = 1e-4
         self._build_ui()
 
     def _next_plan_generation(self) -> int:
@@ -257,8 +366,8 @@ class FeatureSelectorPanel:
         self.diagnostics_label = self.current_result
 
         # ── Row 3: CadQuery Selector Expression Editor ──
-        self.expr_edit = QtWidgets.QPlainTextEdit()
-        self.expr_edit.setPlaceholderText('e.g. >Z, |Z and >Y, faces(">Z").edges("<X")')
+        self.expr_edit = ExpressionEditor(panel=self)
+        self.expr_edit.setPlaceholderText('e.g. >Z, |Z and >Y, faces(">Z").edges("<X"), :concave, >>radius[0]')
         font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
         font.setPointSize(10)
         self.expr_edit.setFont(font)
@@ -267,12 +376,12 @@ class FeatureSelectorPanel:
         self.expr_edit.textChanged.connect(self._on_expr_changed)
         layout.addWidget(self.expr_edit)
 
-        # ── Row 4: Action / Helper row: Autocomplete, Presets, Help ──
+        # ── Row 4: Action / Helper row: Autocomplete, Presets, Tolerance, Python, Help ──
         action_row = QtWidgets.QHBoxLayout()
         action_row.setSpacing(4)
 
         self.autocomplete_btn = QtWidgets.QPushButton("⚡ Autocomplete")
-        self.autocomplete_btn.setToolTip("Find selector matching selection and insert at cursor position.")
+        self.autocomplete_btn.setToolTip("Find selector matching selection and insert at cursor position (or press Tab).")
         self.autocomplete_btn.clicked.connect(self.autocomplete_in_cursor)
         action_row.addWidget(self.autocomplete_btn)
 
@@ -283,6 +392,20 @@ class FeatureSelectorPanel:
         self.preset_combo.currentIndexChanged.connect(self._preset_chosen)
         self.preset_combo.setToolTip("Insert selector snippet at cursor.")
         action_row.addWidget(self.preset_combo, 1)
+
+        tol_label = QtWidgets.QLabel("ε:")
+        tol_label.setToolTip("Tolerance for metric comparisons & grouping (default: 1e-4)")
+        self.tol_edit = QtWidgets.QLineEdit("1e-4")
+        self.tol_edit.setMaximumWidth(50)
+        self.tol_edit.setToolTip("Tolerance for metric comparisons & grouping (e.g. 1e-4, 0.01, 1.0)")
+        self.tol_edit.textChanged.connect(self._on_tolerance_changed)
+        action_row.addWidget(tol_label)
+        action_row.addWidget(self.tol_edit)
+
+        self.copy_btn = QtWidgets.QPushButton("📋 Python")
+        self.copy_btn.setToolTip("Copy reproducible Python code to clipboard.")
+        self.copy_btn.clicked.connect(self.copy_python_code)
+        action_row.addWidget(self.copy_btn)
 
         self.help_btn = QtWidgets.QToolButton()
         self.help_btn.setText("?")
@@ -469,7 +592,7 @@ class FeatureSelectorPanel:
     # ---------- Selection capture & change ----------
 
     def change_target(self):
-        """Update target feature(s) from active 3D selection."""
+        """Update target feature(s) from active 3D selection or model tree."""
         sources, object_only = _selection_snapshot()
         if not sources:
             if len(object_only) == 1:
@@ -480,6 +603,12 @@ class FeatureSelectorPanel:
                 # Subelement consumer or whole shape
                 from fs_bindings import inspect_feature_references
                 refs_info = inspect_feature_references(obj)
+                if not refs_info:
+                    from fs_bindings import _profile_sketches
+                    for sk in _profile_sketches(obj):
+                        refs_info = inspect_feature_references(sk)
+                        if refs_info:
+                            break
                 if refs_info:
                     sub_refs = [r for r in refs_info if r.get("subnames") and r.get("subnames") != [""] and r.get("kind") != "Shape"]
                     info = sub_refs[0] if sub_refs else refs_info[0]
@@ -497,7 +626,7 @@ class FeatureSelectorPanel:
             _notify_user(
                 Gui.getMainWindow() if Gui else None,
                 "Feature Selector",
-                "Select subelements (faces, edges, etc.) in the 3D view, then click Change.",
+                "Select subelements (faces, edges, etc.) in the 3D view or a feature in the model tree, then click Change.",
                 "info",
             )
             return
@@ -574,6 +703,15 @@ class FeatureSelectorPanel:
             return
         self._update_merged_status()
 
+    def _on_tolerance_changed(self):
+        try:
+            val = float(self.tol_edit.text().strip())
+            if val > 0:
+                self.tolerance = val
+        except (ValueError, TypeError):
+            self.tolerance = 1e-4
+        self._on_expr_changed()
+
     def autocomplete_in_cursor(self):
         """Autocomplete at cursor position to find matching selector."""
         if not self.source_obj or not self.target_subnames or not self.kind:
@@ -639,7 +777,8 @@ class FeatureSelectorPanel:
             return
 
         try:
-            matched_items = evaluate_expression_items(self.source_obj, expr, kind=self.kind)
+            tol = getattr(self, "tolerance", 1e-4)
+            matched_items = evaluate_expression_items(self.source_obj, expr, kind=self.kind, tolerance=tol)
         except Exception as exc:
             _notify_user(
                 Gui.getMainWindow() if Gui else None,
@@ -719,7 +858,8 @@ class FeatureSelectorPanel:
 
         t0 = time.perf_counter()
         try:
-            matched_items = evaluate_expression_items(self.source_obj, expr, kind=self.kind)
+            tol = getattr(self, "tolerance", 1e-4)
+            matched_items = evaluate_expression_items(self.source_obj, expr, kind=self.kind, tolerance=tol)
             self.last_resolved = matched_items
             t_ms = (time.perf_counter() - t0) * 1000.0
             matched_names = {item.subname for item in matched_items}
@@ -733,7 +873,7 @@ class FeatureSelectorPanel:
                 target_set = set(self.target_subnames)
                 if matched_names == target_set:
                     self.current_result.setText(f"✓ {m_count} {self.kind or res_kind}(s) (Exact match) · {t_ms:.1f}ms")
-                    self.current_result.setStyleSheet("font-weight: bold; color: #44cc44;")
+                    self.current_result.setStyleSheet("font-weight: bold; color: #2e7d32; background-color: rgba(46, 125, 50, 0.12); border-radius: 3px; padding: 2px 6px;")
                     exact_sel = Selector(
                         kind=self.kind or res_kind,
                         steps=tuple(self.steps),
@@ -742,14 +882,24 @@ class FeatureSelectorPanel:
                         expression=expr,
                     )
                     self.plans = [Plan(selector=exact_sel, score=(1, 0, 0), explanation="Exact match")]
+                elif target_set.issubset(matched_names):
+                    extra = len(matched_names) - len(target_set)
+                    self.plans = []
+                    self.current_result.setText(f"⚠ {m_count} {self.kind or res_kind}(s) ({count} target, +{extra} extra) · {t_ms:.1f}ms")
+                    self.current_result.setStyleSheet("font-weight: bold; color: #ef6c00; background-color: rgba(239, 108, 0, 0.12); border-radius: 3px; padding: 2px 6px;")
+                elif matched_names.issubset(target_set):
+                    missing = len(target_set) - len(matched_names)
+                    self.plans = []
+                    self.current_result.setText(f"⚠ {m_count} {self.kind or res_kind}(s) ({count} target, -{missing} missing) · {t_ms:.1f}ms")
+                    self.current_result.setStyleSheet("font-weight: bold; color: #c62828; background-color: rgba(198, 40, 40, 0.12); border-radius: 3px; padding: 2px 6px;")
                 else:
                     self.plans = []
-                    self.current_result.setText(f"⚠ {m_count} {self.kind or res_kind}(s) (not exact, {count} target) · {t_ms:.1f}ms")
-                    self.current_result.setStyleSheet("font-weight: bold; color: #ccaa44;")
+                    self.current_result.setText(f"⚠ {m_count} {self.kind or res_kind}(s) (mismatched, {count} target) · {t_ms:.1f}ms")
+                    self.current_result.setStyleSheet("font-weight: bold; color: #ef6c00; background-color: rgba(239, 108, 0, 0.12); border-radius: 3px; padding: 2px 6px;")
             else:
                 self.plans = []
                 self.current_result.setText(f"Found {m_count} {res_kind}(s) · {t_ms:.1f}ms (click Set as Target)")
-                self.current_result.setStyleSheet("font-weight: bold; color: #44aacc;")
+                self.current_result.setStyleSheet("font-weight: bold; color: #0277bd; background-color: rgba(2, 119, 189, 0.12); border-radius: 3px; padding: 2px 6px;")
 
             if self.live_preview_cb.isChecked():
                 self._update_3d_preview([item.shape for item in matched_items])
@@ -759,7 +909,7 @@ class FeatureSelectorPanel:
                 self.set_target_btn.setEnabled(False)
             t_ms = (time.perf_counter() - t0) * 1000.0
             self.current_result.setText(f"❌ Syntax/Evaluation: {exc} · {t_ms:.1f}ms")
-            self.current_result.setStyleSheet("font-weight: bold; color: #cc4444;")
+            self.current_result.setStyleSheet("font-weight: bold; color: #c62828; background-color: rgba(198, 40, 40, 0.12); border-radius: 3px; padding: 2px 6px;")
 
     def _toggle_live_preview(self, checked: bool):
         if checked:
@@ -777,7 +927,8 @@ class FeatureSelectorPanel:
         try:
             expr = self.expr_edit.toPlainText().strip()
             if expr:
-                refs = evaluate_expression(self.source_obj, expr, kind=self.kind)
+                tol = getattr(self, "tolerance", 1e-4)
+                refs = evaluate_expression(self.source_obj, expr, kind=self.kind, tolerance=tol)
                 if refs:
                     add_selection(refs, clear=True)
         except Exception:
@@ -790,7 +941,8 @@ class FeatureSelectorPanel:
         if not expr:
             return None
         try:
-            refs = evaluate_expression(self.source_obj, expr, kind=self.kind)
+            tol = getattr(self, "tolerance", 1e-4)
+            refs = evaluate_expression(self.source_obj, expr, kind=self.kind, tolerance=tol)
             resolved_names = {r.subname for r in refs}
             if resolved_names != set(self.target_subnames):
                 return None
@@ -887,6 +1039,8 @@ class FeatureSelectorPanel:
         clipboard = QtWidgets.QApplication.clipboard()
         if clipboard is not None:
             clipboard.setText(code)
+        if hasattr(self, "status") and self.status is not None:
+            self.status.setText("Python snippet copied to clipboard!")
         if hasattr(App, "Console"):
             App.Console.PrintMessage("\n" + code + "\n")
 
@@ -902,10 +1056,12 @@ class FeatureSelectorPanel:
             "<li><b>Extrema:</b> <code>&gt;Z</code> (max Z), <code>&lt;Z</code> (min Z), <code>&gt;X</code>, <code>&lt;Y</code></li>"
             "<li><b>Orientation:</b> <code>|Z</code> (parallel to Z), <code>#Z</code> (orthogonal to Z)</li>"
             "<li><b>Normal:</b> <code>+Z</code> (normal in +Z), <code>-Z</code> (normal in -Z)</li>"
-            "<li><b>Types:</b> <code>%Plane</code>, <code>%Cylinder</code>, <code>%Line</code>, <code>%Circle</code></li>"
-            "<li><b>Logical:</b> <code>&gt;Z and %Plane</code>, <code>|Z or &gt;Y</code>, <code>not |Z</code></li>"
+            "<li><b>Tags:</b> <code>:concave</code>, <code>:convex</code>, <code>:smooth</code>, <code>:closed</code>, <code>:planar</code></li>"
+            "<li><b>Clustering:</b> <code>&gt;&gt;radius[0]</code> (largest), <code>&lt;&lt;radius[0]</code> (smallest), <code>&gt;&gt;length[0:2]</code></li>"
+            "<li><b>Comparison:</b> <code>radius == 10.0</code>, <code>3.0 &lt;= diameter &lt;= 8.0</code></li>"
+            "<li><b>Relational:</b> <code>adjacent_to('Face1')</code>, <code>coplanar_to(...)</code></li>"
             "<li><b>Descending:</b> <code>faces('&gt;Z').edges('&lt;X')</code></li>"
-            "<li><b>⚡ Autocomplete:</b> Click to auto-fill at cursor!</li>"
+            "<li><b>⚡ Autocomplete:</b> Click button or press <b>Tab</b> to autocomplete!</li>"
             "</ul>"
         )
         msg = QtWidgets.QMessageBox(Gui.getMainWindow() if Gui else None)

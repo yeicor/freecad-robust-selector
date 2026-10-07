@@ -226,7 +226,7 @@ class TestRealFreeCADComplexGeometry(unittest.TestCase):
         self.assertEqual(reconstructed.kind, "Edge")
         self.assertEqual(len(subnames), 4)
 
-    def _test_07_gui_presets_and_copy_python_button(self):
+    def test_07_gui_presets_and_copy_python_button(self):
         """Verify new presets and Copy Python button are accessible in FeatureSelectorPanel."""
         from fs_gui import FeatureSelectorPanel, PRESETS
 
