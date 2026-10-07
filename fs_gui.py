@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import time
 from typing import Any, Optional, Sequence
 
@@ -193,68 +194,127 @@ class ExpressionHighlighter(QtGui.QSyntaxHighlighter):
 
 
 class ExpressionEditor(QtWidgets.QPlainTextEdit):
-    """QPlainTextEdit with syntax highlighting and Tab-based auto-completion."""
+    """QPlainTextEdit with syntax highlighting and IDE-like Tab-based auto-completion (UX-5)."""
 
-    TAB_COMPLETIONS = [
-        # Tags
-        (":conca", ":concave"),
-        (":conve", ":convex"),
-        (":con", ":concave"),
-        (":smo", ":smooth"),
-        (":clo", ":closed"),
-        (":boun", ":boundary"),
-        (":hol", ":hole"),
-        (":pla", ":planar"),
-        (":cyl", ":cylindrical"),
-        (":cir", ":circular"),
-        (":lin", ":linear"),
+    VOCABULARY = [
         # Methods
-        ("fac", 'faces("'),
-        ("edg", 'edges("'),
-        ("ver", 'vertices("'),
-        ("wir", 'wires("'),
-        # Extrema & Clusters
-        (">>rad", ">>radius[0]"),
-        ("<<rad", "<<radius[0]"),
-        (">>len", ">>length[0]"),
-        ("<<len", "<<length[0]"),
-        (">>ar", ">>area[0]"),
-        ("<<ar", "<<area[0]"),
-        # Combinators
-        ("adj", 'adjacent_to("'),
-        ("cop", 'coplanar_to("'),
-        ("coa", 'coaxial_to("'),
+        'faces("', 'edges("', 'vertices("', 'wires("',
+        'faces()', 'edges()', 'vertices()', 'wires()',
+        # Extrema & Axes
+        '>Z', '<Z', '>X', '<X', '>Y', '<Y',
+        '|Z', '|X', '|Y', '#Z', '#X', '#Y',
+        '+Z', '-Z', '+X', '-X', '+Y', '-Y',
+        # Geometry Types
+        '%Plane', '%Cylinder', '%Sphere', '%Cone', '%Torus', '%Line', '%Circle',
+        # Topological & Convexity Tags
+        ':concave', ':convex', ':smooth', ':closed', ':boundary', ':manifold',
+        ':seam', ':hole', ':inner', ':outer', ':planar', ':cylindrical',
+        ':circular', ':linear', ':spherical', ':conical', ':toroidal',
+        # Canonical Metric Clustering & Slices (EXP-1, EXP-2)
+        '>>radius[0]', '<<radius[0]', '>>dia[0]', '<<dia[0]',
+        '>>length[0]', '<<length[0]', '>>area[0]', '<<area[0]',
+        '>>Z[0]', '<<Z[0]', '>>X[0]', '<<X[0]', '>>Y[0]', '<<Y[0]',
+        # Relational Combinators (EXP-5)
+        'adjacent_to("', 'coplanar_to("', 'coaxial_to("',
+        # Logic Keywords
+        'and', 'or', 'not', 'exc', 'in',
     ]
 
     def __init__(self, panel: Optional[Any] = None, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
         self.panel = panel
         self.highlighter = ExpressionHighlighter(self.document())
+        self._completer = None
+        self._init_completer()
+
+    def _init_completer(self):
+        try:
+            self._completer = QtWidgets.QCompleter(self.VOCABULARY, self)
+            self._completer.setWidget(self)
+            self._completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+            self._completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+            self._completer.activated.connect(self._insert_completion)
+        except Exception:
+            self._completer = None
+
+    def _insert_completion(self, completion: str):
+        tc = self.textCursor()
+        prefix = self._token_under_cursor()
+        if prefix:
+            move_op = getattr(QtGui.QTextCursor.MoveOperation, "Left", 1)
+            keep_anchor = getattr(QtGui.QTextCursor.MoveMode, "KeepAnchor", 1)
+            tc.movePosition(move_op, keep_anchor, len(prefix))
+        tc.insertText(completion)
+        self.setTextCursor(tc)
+
+    def _token_under_cursor(self) -> str:
+        tc = self.textCursor()
+        pos = tc.position()
+        text = self.toPlainText()
+        start = pos
+        while start > 0 and (text[start - 1].isalnum() or text[start - 1] in ":>#<|+-%_"):
+            start -= 1
+        return text[start:pos]
 
     def keyPressEvent(self, event: QtGui.QKeyEvent):
         key = event.key()
         key_tab = getattr(QtCore.Qt.Key, "Key_Tab", 0x01000001)
+        key_enter = getattr(QtCore.Qt.Key, "Key_Enter", 0x01000004)
+        key_return = getattr(QtCore.Qt.Key, "Key_Return", 0x01000005)
+        key_escape = getattr(QtCore.Qt.Key, "Key_Escape", 0x01000000)
+
+        # 1. If completer popup is visible, route navigation keys
+        if self._completer and self._completer.popup() and self._completer.popup().isVisible():
+            if key in (key_enter, key_return):
+                self._completer.popup().hide()
+                idx = self._completer.popup().currentIndex()
+                if idx.isValid():
+                    self._insert_completion(idx.data())
+                return
+            elif key == key_escape:
+                self._completer.popup().hide()
+                return
+
+        # 2. Tab completion (UX-5)
         if key == key_tab:
+            if self._completer and self._completer.popup():
+                self._completer.popup().hide()
+
             cursor = self.textCursor()
             pos = cursor.position()
             text = self.toPlainText()
             prefix = text[:pos]
 
-            # 1. Check dictionary tab completions
-            for token, full in self.TAB_COMPLETIONS:
-                if prefix.endswith(token):
-                    cursor.setPosition(pos - len(token), QtGui.QTextCursor.MoveMode.KeepAnchor)
-                    cursor.insertText(full)
-                    self.setTextCursor(cursor)
-                    return
-
-            # 2. If at empty string or empty argument: trigger smart autocomplete from panel
+            # If empty or empty argument, trigger smart autocomplete
             if self.panel and (not text.strip() or prefix.endswith('("') or prefix.endswith("('")):
                 self.panel.autocomplete_in_cursor()
                 return
 
-            return  # Swallow Tab without inserting literal indentation
+            tok = self._token_under_cursor()
+            if tok:
+                matches = [w for w in self.VOCABULARY if w.lower().startswith(tok.lower())]
+                if matches:
+                    self._insert_completion(matches[0])
+                    return
+
+            # Fallback to smart panel autocomplete if cursor is in an expression
+            if self.panel:
+                self.panel.autocomplete_in_cursor()
+            return  # Swallow Tab without inserting literal whitespace
+
         super().keyPressEvent(event)
+
+
+class _PreselectionObserver:
+    """VIS-2: Ephemeral 3D Hover Metric Inspector observer."""
+
+    def __init__(self, panel: Any):
+        self.panel = panel
+
+    def setPreselect(self, doc_name: str, obj_name: str, subname: str):
+        if hasattr(self.panel, "_on_preselect"):
+            self.panel._on_preselect(doc_name, obj_name, subname)
+
 
 
 # ---------------------------------------------------------------------------
@@ -343,29 +403,15 @@ class FeatureSelectorPanel:
         self.change_btn.setMaximumWidth(70)
         self.change_btn.clicked.connect(self.change_target)
         target_row.addWidget(self.change_btn)
-        layout.addLayout(target_row)
-
-        # ── Row 2: Merged Compact Status & Live preview checkbox ──
-        status_row = QtWidgets.QHBoxLayout()
-        status_row.setSpacing(4)
-        self.current_result = QtWidgets.QLabel("Result: —")
-        self.current_result.setWordWrap(True)
-        self.current_result.setStyleSheet("color: palette(mid);")
-        status_row.addWidget(self.current_result, 1)
 
         self.live_preview_cb = QtWidgets.QCheckBox("Preview")
         self.live_preview_cb.setChecked(True)
         self.live_preview_cb.setToolTip("Live 3D highlight of matching subelements.")
         self.live_preview_cb.toggled.connect(self._toggle_live_preview)
-        status_row.addWidget(self.live_preview_cb)
-        layout.addLayout(status_row)
+        target_row.addWidget(self.live_preview_cb)
+        layout.addLayout(target_row)
 
-        # Compatibility aliases for legacy tests
-        self.status = self.current_result
-        self.source_label = self.target_label
-        self.diagnostics_label = self.current_result
-
-        # ── Row 3: CadQuery Selector Expression Editor ──
+        # ── Row 2: CadQuery Selector Expression Editor ──
         self.expr_edit = ExpressionEditor(panel=self)
         self.expr_edit.setPlaceholderText('e.g. >Z, |Z and >Y, faces(">Z").edges("<X"), :concave, >>radius[0]')
         font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
@@ -375,6 +421,18 @@ class FeatureSelectorPanel:
         self.expr_edit.setMaximumHeight(90)
         self.expr_edit.textChanged.connect(self._on_expr_changed)
         layout.addWidget(self.expr_edit)
+
+        # ── Row 3: VIS-4 Live Syntax & Match Count Ribbon Badge directly under editor ──
+        self.match_ribbon = QtWidgets.QLabel("Result: —")
+        self.match_ribbon.setWordWrap(True)
+        self.match_ribbon.setStyleSheet("font-size: 11px; padding: 2px 6px; border-radius: 3px; color: palette(mid);")
+        layout.addWidget(self.match_ribbon)
+
+        # Compatibility aliases for tests & panel callers
+        self.current_result = self.match_ribbon
+        self.status = self.match_ribbon
+        self.source_label = self.target_label
+        self.diagnostics_label = self.match_ribbon
 
         # ── Row 4: Action / Helper row: Autocomplete, Presets, Tolerance, Python, Help ──
         action_row = QtWidgets.QHBoxLayout()
@@ -394,17 +452,22 @@ class FeatureSelectorPanel:
         action_row.addWidget(self.preset_combo, 1)
 
         tol_label = QtWidgets.QLabel("ε:")
-        tol_label.setToolTip("Tolerance for metric comparisons & grouping (default: 1e-4)")
-        self.tol_edit = QtWidgets.QLineEdit("1e-4")
-        self.tol_edit.setMaximumWidth(50)
-        self.tol_edit.setToolTip("Tolerance for metric comparisons & grouping (e.g. 1e-4, 0.01, 1.0)")
-        self.tol_edit.textChanged.connect(self._on_tolerance_changed)
+        tol_label.setToolTip("Clustering & numeric comparison tolerance (default: 1e-4)")
+        self.tol_combo = QtWidgets.QComboBox()
+        self.tol_combo.setEditable(True)
+        self.tol_combo.addItems(["1e-4", "0.001", "0.01", "0.1", "1.0", "5.0"])
+        self.tol_combo.setCurrentText("1e-4")
+        self.tol_combo.setMaximumWidth(70)
+        self.tol_combo.setToolTip("Tolerance for metric comparisons & grouping (choose preset or enter custom value)")
+        self.tol_combo.currentTextChanged.connect(self._on_tolerance_changed)
+        self.tol_edit = self.tol_combo.lineEdit()
         action_row.addWidget(tol_label)
-        action_row.addWidget(self.tol_edit)
+        action_row.addWidget(self.tol_combo)
 
         self.copy_btn = QtWidgets.QPushButton("📋 Python")
         self.copy_btn.setToolTip("Copy reproducible Python code to clipboard.")
         self.copy_btn.clicked.connect(self.copy_python_code)
+        self.copy_python_btn = self.copy_btn
         action_row.addWidget(self.copy_btn)
 
         self.help_btn = QtWidgets.QToolButton()
@@ -414,6 +477,32 @@ class FeatureSelectorPanel:
         action_row.addWidget(self.help_btn)
         layout.addLayout(action_row)
 
+        # ── Row 5: Compact Target Binding Controls ──
+        bind_row = QtWidgets.QHBoxLayout()
+        bind_row.setSpacing(4)
+        bind_lbl = QtWidgets.QLabel("Target:")
+        bind_row.addWidget(bind_lbl)
+
+        self.target_combo = QtWidgets.QComboBox()
+        self.target_combo.addItem("(No target feature)", "")
+        self.target_combo.currentIndexChanged.connect(self._target_feature_changed)
+        bind_row.addWidget(self.target_combo, 1)
+
+        self.property_combo = QtWidgets.QComboBox()
+        self.property_combo.addItem("(Property)", "")
+        bind_row.addWidget(self.property_combo, 1)
+
+        self.bind_btn = QtWidgets.QPushButton("Create Robust Selector")
+        self.bind_btn.setToolTip("Bind target property or create robust selector.")
+        self.bind_btn.clicked.connect(self.bind_target_property)
+        bind_row.addWidget(self.bind_btn)
+
+        self.unbind_btn = QtWidgets.QPushButton("Unbind")
+        self.unbind_btn.setToolTip("Remove binding from target property.")
+        self.unbind_btn.clicked.connect(self.unbind_target_property)
+        bind_row.addWidget(self.unbind_btn)
+        layout.addLayout(bind_row)
+
         layout.addStretch(1)
 
         scroll_outer = QtWidgets.QScrollArea()
@@ -422,6 +511,138 @@ class FeatureSelectorPanel:
         scroll_outer.setWidget(root)
         scroll_outer.setWindowTitle("Feature Selector")
         self.form = scroll_outer
+
+    def _set_target_combo_to_object(self, obj: Any, prop: str = ""):
+        name = getattr(obj, "Name", "")
+        if name and hasattr(self, "target_combo"):
+            idx = self.target_combo.findData(name)
+            if idx < 0:
+                self.target_combo.addItem(getattr(obj, "Label", name), name)
+                idx = self.target_combo.count() - 1
+            self.target_combo.setCurrentIndex(idx)
+            self._update_property_combo(obj)
+            if prop and hasattr(self, "property_combo"):
+                p_idx = self.property_combo.findData(prop)
+                if p_idx >= 0:
+                    self.property_combo.setCurrentIndex(p_idx)
+
+    def use_selected_target(self):
+        """Adopt selected feature from FreeCAD selection as target binding feature."""
+        sources, object_only = _selection_snapshot()
+        obj = None
+        if sources:
+            obj = sources[0][0]
+        elif object_only:
+            obj = object_only[0]
+        if obj is not None:
+            self._set_target_combo_to_object(obj)
+            doc = getattr(obj, "Document", None) or (App.ActiveDocument if App else None)
+            if doc:
+                from fs_bindings import read_binding_records
+                target_name = getattr(obj, "Name", "")
+                for o in getattr(doc, "Objects", []):
+                    if hasattr(o, "Query") and hasattr(o, "TargetBindings"):
+                        for rec in read_binding_records(o):
+                            if rec.get("target") == target_name:
+                                self.selector_obj = o
+                                break
+
+    def _target_feature_changed(self, index: int):
+        data = self.target_combo.itemData(index) if hasattr(self, "target_combo") else None
+        if not data:
+            if hasattr(self, "property_combo"):
+                self.property_combo.clear()
+                self.property_combo.addItem("(Property)", "")
+            if hasattr(self, "bind_btn"):
+                self.bind_btn.setText("Create Robust Selector")
+            return
+        doc = App.ActiveDocument if App else None
+        target_obj = doc.getObject(data) if doc else None
+        if target_obj:
+            self._update_property_combo(target_obj)
+            if hasattr(self, "bind_btn"):
+                self.bind_btn.setText("Bind Target Property")
+
+    def _update_property_combo(self, target_obj: Any):
+        if not hasattr(self, "property_combo"):
+            return
+        self.property_combo.clear()
+        try:
+            from fs_bindings import inspect_feature_references
+            refs = inspect_feature_references(target_obj)
+        except Exception:
+            refs = []
+        if refs:
+            for r in refs:
+                prop = r.get("property", "")
+                if prop in ("FeatureSelectorSources", "FeatureSelectorBindings") or not prop:
+                    continue
+                self.property_combo.addItem(f"{prop} ({r.get('kind', 'Ref')})", prop)
+        else:
+            for p in ("AttachmentSupport", "Base", "Edges", "Faces", "Support"):
+                if hasattr(target_obj, p):
+                    self.property_combo.addItem(p, p)
+        if self.property_combo.count() == 0:
+            self.property_combo.addItem("AttachmentSupport", "AttachmentSupport")
+
+    def bind_target_property(self):
+        target_name = self.target_combo.currentData() if hasattr(self, "target_combo") else ""
+        if not target_name:
+            self.save_selector()
+            if hasattr(self, "status"):
+                self.status.setText("Saved")
+            if hasattr(self, "bind_btn"):
+                self.bind_btn.setText("Save Changes")
+            return
+        doc = App.ActiveDocument if App else None
+        target_obj = doc.getObject(target_name) if doc else None
+        if not target_obj:
+            return
+        prop_name = self.property_combo.currentData() if hasattr(self, "property_combo") else ""
+        if not prop_name and hasattr(self, "property_combo"):
+            prop_name = self.property_combo.currentText().split()[0]
+        if not self.selector_obj:
+            self.save_selector()
+        if not self.selector_obj:
+            return
+        try:
+            from fs_bindings import bind_selector, update_selector_bindings
+            bind_selector(self.selector_obj, target_obj, prop_name, mode="robust")
+            selector = self._exact_selector()
+            if selector and self.source_obj:
+                update_selector_bindings(self.selector_obj, selector)
+            if hasattr(self, "status"):
+                self.status.setText(f"Bound to {target_name}.{prop_name}")
+            if hasattr(self, "bind_btn"):
+                self.bind_btn.setText("Save Changes")
+        except Exception as exc:
+            _notify_user(Gui.getMainWindow() if Gui else None, "Feature Selector", f"Could not bind: {exc}", "warning")
+
+    def unbind_target_property(self):
+        target_name = self.target_combo.currentData() if hasattr(self, "target_combo") else ""
+        prop_name = self.property_combo.currentData() if hasattr(self, "property_combo") else None
+        if not self.selector_obj and target_name:
+            doc = App.ActiveDocument if App else None
+            if doc:
+                from fs_bindings import read_binding_records
+                for o in getattr(doc, "Objects", []):
+                    if hasattr(o, "Query") and hasattr(o, "TargetBindings"):
+                        for rec in read_binding_records(o):
+                            if rec.get("target") == target_name:
+                                self.selector_obj = o
+                                break
+        if self.selector_obj:
+            try:
+                from fs_bindings import unbind_selector, read_binding_records
+                records = read_binding_records(self.selector_obj)
+                target_props = {r.get("property") for r in records if r.get("target") == target_name}
+                if prop_name not in target_props:
+                    prop_name = None
+                count = unbind_selector(self.selector_obj, target_name or None, prop_name)
+                if hasattr(self, "status"):
+                    self.status.setText(f"Removed {count} explicit binding(s)")
+            except Exception as exc:
+                _notify_user(Gui.getMainWindow() if Gui else None, "Feature Selector", f"Could not unbind: {exc}", "warning")
 
     # ---------- lifecycle / dialog ----------
 
@@ -472,8 +693,19 @@ class FeatureSelectorPanel:
                 except Exception:
                     pass
             self._build_ui()
+            # UX-3: Contextual feature auto-detect on panel open
+            if not self.has_active_selector() and getattr(Gui, "Selection", None):
+                sources, object_only = _selection_snapshot()
+                if sources or object_only:
+                    self.change_target()
             if self.has_active_selector():
                 self._update_merged_status()
+            if Gui and hasattr(Gui, "Selection") and hasattr(Gui.Selection, "addObserver"):
+                try:
+                    self._observer = _PreselectionObserver(self)
+                    Gui.Selection.addObserver(self._observer)
+                except Exception:
+                    self._observer = None
             try:
                 Gui.Control.showDialog(self)
             except RuntimeError:
@@ -482,6 +714,36 @@ class FeatureSelectorPanel:
             self._dialog_open = True
             return True
         return False
+
+    def _on_preselect(self, doc_name: str, obj_name: str, subname: str):
+        """VIS-2: Ephemeral 3D Hover Metric Inspector HUD."""
+        if not self.source_obj or not subname:
+            return
+        if getattr(self.source_obj, "Name", "") != obj_name:
+            return
+        kind = shape_type_from_subname(subname) or self.kind or "Shape"
+        try:
+            from fs_selector import candidate_for
+            item = candidate_for(self.source_obj, subname, kind)
+            tags = []
+            if getattr(item, "convexity", None):
+                tags.append(f"[{item.convexity}]")
+            metrics = []
+            if hasattr(item, "length") and item.length is not None and math.isfinite(item.length):
+                metrics.append(f"L={item.length:.2f}mm")
+            if hasattr(item, "radius") and item.radius is not None and math.isfinite(item.radius):
+                metrics.append(f"⌀{item.radius*2.0:.2f}mm")
+            if hasattr(item, "area") and item.area is not None and math.isfinite(item.area):
+                metrics.append(f"A={item.area:.2f}mm²")
+            tag_str = " ".join(tags)
+            m_str = " · ".join(metrics)
+            hud_text = f"{subname}: {item.geom_type.title()} {tag_str} · {m_str}".strip(" · ")
+            if Gui and hasattr(Gui, "getMainWindow") and Gui.getMainWindow():
+                sb = Gui.getMainWindow().statusBar()
+                if sb:
+                    sb.showMessage(hud_text, 2500)
+        except Exception:
+            pass
 
     def edit_selector_object(self, selector_obj: Any) -> bool:
         try:
@@ -507,6 +769,14 @@ class FeatureSelectorPanel:
             Gui.Selection.clearSelection()
 
     def close_panel(self):
+        self._clear_3color_highlighting()
+        self._clear_3d_direction_indicator()
+        if getattr(self, "_observer", None) and Gui and hasattr(Gui, "Selection") and hasattr(Gui.Selection, "removeObserver"):
+            try:
+                Gui.Selection.removeObserver(self._observer)
+            except Exception:
+                pass
+            self._observer = None
         owns_dialog = False
         if Gui:
             owns_dialog = self._is_own_dialog_active()
@@ -539,6 +809,7 @@ class FeatureSelectorPanel:
 
     def reject(self) -> bool:
         """Triggered by standard Cancel button."""
+        self._clear_3color_highlighting()
         try:
             if Gui is not None:
                 Gui.Selection.clearSelection()
@@ -600,7 +871,23 @@ class FeatureSelectorPanel:
                 if hasattr(obj, "Query") and hasattr(obj, "BaseObject") and obj.BaseObject is not None:
                     self.load_selector_object(obj)
                     return
-                # Subelement consumer or whole shape
+                # Check if this object is bound to an existing selector object
+                doc = getattr(obj, "Document", None) or (App.ActiveDocument if App else None)
+                bound_selector = None
+                if doc:
+                    from fs_bindings import read_binding_records
+                    for o in getattr(doc, "Objects", []):
+                        if hasattr(o, "Query") and hasattr(o, "TargetBindings"):
+                            for rec in read_binding_records(o):
+                                if rec.get("target") == getattr(obj, "Name", ""):
+                                    bound_selector = o
+                                    break
+                if bound_selector is not None:
+                    self.load_selector_object(bound_selector)
+                    self._set_target_combo_to_object(obj)
+                    return
+
+                # Subelement consumer (Fillet, Chamfer, Pad, Pocket, etc.) or whole shape
                 from fs_bindings import inspect_feature_references
                 refs_info = inspect_feature_references(obj)
                 if not refs_info:
@@ -615,6 +902,7 @@ class FeatureSelectorPanel:
                     if self._refuse_foreign_source(info["source"]):
                         return
                     self._reset_target_state(info["source"], info["kind"], info["subnames"])
+                    self._set_target_combo_to_object(obj, info.get("property", ""))
                     return
                 shape = getattr(obj, "Shape", None)
                 if shape is not None and not shape.isNull():
@@ -869,10 +1157,16 @@ class FeatureSelectorPanel:
             if hasattr(self, "set_target_btn"):
                 self.set_target_btn.setEnabled(m_count > 0)
 
+            # VIS-3: Direction indicator cue
+            cue = ""
+            m_dir = re.search(r"([><|#+\-])([XYZ])\b", expr, re.IGNORECASE)
+            if m_dir:
+                cue = f" [{m_dir.group(1)}{m_dir.group(2).upper()}]"
+
             if self.target_subnames:
                 target_set = set(self.target_subnames)
                 if matched_names == target_set:
-                    self.current_result.setText(f"✓ {m_count} {self.kind or res_kind}(s) (Exact match) · {t_ms:.1f}ms")
+                    self.current_result.setText(f"✓ {m_count} {self.kind or res_kind}(s) (Exact match){cue} · {t_ms:.1f}ms")
                     self.current_result.setStyleSheet("font-weight: bold; color: #2e7d32; background-color: rgba(46, 125, 50, 0.12); border-radius: 3px; padding: 2px 6px;")
                     exact_sel = Selector(
                         kind=self.kind or res_kind,
@@ -885,21 +1179,42 @@ class FeatureSelectorPanel:
                 elif target_set.issubset(matched_names):
                     extra = len(matched_names) - len(target_set)
                     self.plans = []
-                    self.current_result.setText(f"⚠ {m_count} {self.kind or res_kind}(s) ({count} target, +{extra} extra) · {t_ms:.1f}ms")
+                    self.current_result.setText(f"▲ {m_count} {self.kind or res_kind}(s) ({count} target, +{extra} extra){cue} · {t_ms:.1f}ms")
                     self.current_result.setStyleSheet("font-weight: bold; color: #ef6c00; background-color: rgba(239, 108, 0, 0.12); border-radius: 3px; padding: 2px 6px;")
                 elif matched_names.issubset(target_set):
                     missing = len(target_set) - len(matched_names)
                     self.plans = []
-                    self.current_result.setText(f"⚠ {m_count} {self.kind or res_kind}(s) ({count} target, -{missing} missing) · {t_ms:.1f}ms")
+                    self.current_result.setText(f"▼ {m_count} {self.kind or res_kind}(s) ({count} target, -{missing} missing){cue} · {t_ms:.1f}ms")
                     self.current_result.setStyleSheet("font-weight: bold; color: #c62828; background-color: rgba(198, 40, 40, 0.12); border-radius: 3px; padding: 2px 6px;")
                 else:
                     self.plans = []
-                    self.current_result.setText(f"⚠ {m_count} {self.kind or res_kind}(s) (mismatched, {count} target) · {t_ms:.1f}ms")
+                    self.current_result.setText(f"⚠ {m_count} {self.kind or res_kind}(s) (mismatched, {count} target){cue} · {t_ms:.1f}ms")
                     self.current_result.setStyleSheet("font-weight: bold; color: #ef6c00; background-color: rgba(239, 108, 0, 0.12); border-radius: 3px; padding: 2px 6px;")
             else:
                 self.plans = []
-                self.current_result.setText(f"Found {m_count} {res_kind}(s) · {t_ms:.1f}ms (click Set as Target)")
+                self.current_result.setText(f"Found {m_count} {res_kind}(s){cue} · {t_ms:.1f}ms (click Set as Target)")
                 self.current_result.setStyleSheet("font-weight: bold; color: #0277bd; background-color: rgba(2, 119, 189, 0.12); border-radius: 3px; padding: 2px 6px;")
+
+            # VIS-2: Build rich metric breakdown tooltip for hovering
+            if matched_items:
+                breakdown = [f"Matched {len(matched_items)} {res_kind}(s):"]
+                for it in matched_items[:12]:
+                    extra_info = []
+                    if getattr(it, "convexity", None):
+                        extra_info.append(f"[{it.convexity}]")
+                    if hasattr(it, "length") and it.length is not None and math.isfinite(it.length):
+                        extra_info.append(f"L={it.length:.2f}mm")
+                    if hasattr(it, "radius") and it.radius is not None and math.isfinite(it.radius):
+                        extra_info.append(f"R={it.radius:.2f}mm")
+                    if hasattr(it, "area") and it.area is not None and math.isfinite(it.area):
+                        extra_info.append(f"A={it.area:.2f}mm²")
+                    info_str = " · ".join(extra_info)
+                    breakdown.append(f"• {it.subname}: {it.geom_type.title()} {info_str}")
+                if len(matched_items) > 12:
+                    breakdown.append(f"... and {len(matched_items) - 12} more")
+                self.current_result.setToolTip("\n".join(breakdown))
+            else:
+                self.current_result.setToolTip("")
 
             if self.live_preview_cb.isChecked():
                 self._update_3d_preview([item.shape for item in matched_items])
@@ -910,16 +1225,100 @@ class FeatureSelectorPanel:
             t_ms = (time.perf_counter() - t0) * 1000.0
             self.current_result.setText(f"❌ Syntax/Evaluation: {exc} · {t_ms:.1f}ms")
             self.current_result.setStyleSheet("font-weight: bold; color: #c62828; background-color: rgba(198, 40, 40, 0.12); border-radius: 3px; padding: 2px 6px;")
+            self.current_result.setToolTip("")
 
     def _toggle_live_preview(self, checked: bool):
         if checked:
             self._update_merged_status()
         else:
+            self._clear_3color_highlighting()
+            self._clear_3d_direction_indicator()
             try:
                 if Gui is not None:
                     Gui.Selection.clearSelection()
             except Exception:
                 pass
+
+    def _apply_3color_highlighting(self, matched_names: set[str], intended_names: set[str]):
+        """VIS-1: Three-color intent highlighting in FreeCAD 3D viewport."""
+        if not self.source_obj or not hasattr(self.source_obj, "ViewObject"):
+            return
+        vo = self.source_obj.ViewObject
+        if vo is None or not hasattr(vo, "setElementColors"):
+            return
+        colors = {}
+        # Green: Intended & Matched
+        for n in (matched_names & intended_names):
+            colors[n] = (0.18, 0.80, 0.44, 0.0)
+        # Amber: Extra / Over-selected
+        for n in (matched_names - intended_names):
+            colors[n] = (0.95, 0.61, 0.07, 0.0)
+        # Red: Missing / Under-selected
+        for n in (intended_names - matched_names):
+            colors[n] = (0.91, 0.30, 0.24, 0.0)
+        try:
+            vo.setElementColors(colors)
+        except Exception:
+            pass
+
+    def _clear_3color_highlighting(self):
+        if self.source_obj and hasattr(self.source_obj, "ViewObject"):
+            vo = self.source_obj.ViewObject
+            if vo and hasattr(vo, "setElementColors"):
+                try:
+                    vo.setElementColors({})
+                except Exception:
+                    pass
+
+    def _update_3d_direction_indicator(self, expr: str, matched_items: Sequence[Any]):
+        """VIS-3: Display a subtle 3D direction indicator on the centroid of matched elements in the viewport."""
+        doc = getattr(self.source_obj, "Document", None) or (App.ActiveDocument if App else None)
+        if not doc or not expr or not matched_items:
+            self._clear_3d_direction_indicator()
+            return
+        m_dir = re.search(r"([><|#+\-])([XYZ])\b", expr, re.IGNORECASE)
+        if not m_dir:
+            self._clear_3d_direction_indicator()
+            return
+        sign, axis = m_dir.group(1), m_dir.group(2).upper()
+        axis_vecs = {"X": App.Vector(1, 0, 0), "Y": App.Vector(0, 1, 0), "Z": App.Vector(0, 0, 1)}
+        vec = axis_vecs.get(axis, App.Vector(0, 0, 1))
+        if sign in ("<", "-"):
+            vec = -vec
+
+        centers = [it.center_tuple for it in matched_items if hasattr(it, "center_tuple")]
+        if not centers:
+            return
+        cx = sum(c[0] for c in centers) / len(centers)
+        cy = sum(c[1] for c in centers) / len(centers)
+        cz = sum(c[2] for c in centers) / len(centers)
+        p0 = App.Vector(cx, cy, cz)
+        p1 = p0 + vec * 15.0
+
+        try:
+            import Part
+            indicator_name = "_FS_DirectionIndicator"
+            ind = doc.getObject(indicator_name)
+            if ind is None:
+                ind = doc.addObject("Part::Feature", indicator_name)
+            ind.Shape = Part.makeLine(p0, p1)
+            if hasattr(ind, "ViewObject") and ind.ViewObject:
+                ind.ViewObject.LineColor = (1.0, 0.55, 0.0)
+                ind.ViewObject.LineWidth = 3.5
+                ind.ViewObject.PointSize = 5.0
+                ind.ViewObject.Visibility = True
+        except Exception:
+            pass
+
+    def _clear_3d_direction_indicator(self):
+        doc = getattr(self.source_obj, "Document", None) or (App.ActiveDocument if App else None)
+        if doc:
+            ind = doc.getObject("_FS_DirectionIndicator")
+            if ind is not None:
+                try:
+                    doc.removeObject("_FS_DirectionIndicator")
+                except Exception:
+                    pass
 
     def _update_3d_preview(self, shapes: Optional[list[Any]] = None):
         if not self.live_preview_cb.isChecked() or not self.source_obj:
@@ -931,6 +1330,10 @@ class FeatureSelectorPanel:
                 refs = evaluate_expression(self.source_obj, expr, kind=self.kind, tolerance=tol)
                 if refs:
                     add_selection(refs, clear=True)
+                matched_names = {r.subname for r in refs}
+                intended_names = set(self.captured_selection or self.target_subnames or [])
+                self._apply_3color_highlighting(matched_names, intended_names)
+                self._update_3d_direction_indicator(expr, getattr(self, "last_resolved", []))
         except Exception:
             pass
 
@@ -994,6 +1397,11 @@ class FeatureSelectorPanel:
         if selector is None:
             # Fall back to selector built from current expression even if not exact
             expr = self.expr_edit.toPlainText().strip()
+            if not expr and self.source_obj and self.target_subnames:
+                ins, _ = autocomplete_at_cursor(self.source_obj, self.target_subnames, self.kind or "Shape", "", 0)
+                if ins:
+                    expr = ins
+                    self.expr_edit.setPlainText(expr)
             if not expr or not self.source_obj or not self.kind:
                 return
             selector = Selector(

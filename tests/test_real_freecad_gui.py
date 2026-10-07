@@ -93,20 +93,29 @@ class TestRealFreeCADGui(unittest.TestCase):
         panel.autocomplete_btn.click()
         self.assertTrue(len(panel.expr_edit.toPlainText()) > len("faces(\">Z\").edges("))
 
-    def _test_04_panel_create_and_bind_workflow(self):
+    def test_04_panel_create_and_bind_workflow(self):
         """Verify the full Create + Bind workflow through the GUI panel."""
         from fs_gui import FeatureSelectorPanel
         panel = FeatureSelectorPanel.instance()
 
-        box = self.doc.GuiBox
+        box = self.doc.getObject("GuiBox")
+        if box is None:
+            box = self.doc.addObject("Part::Box", "GuiBox")
+            box.Length = 50.0
+            box.Width = 40.0
+            box.Height = 25.0
+            self.doc.recompute()
+
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(box, "Face6")
         panel.learn()
 
         # Add target sketch
-        sketch = self.doc.addObject("Sketcher::SketchObject", "GuiSketch")
-        sketch.MapMode = "FlatFace"
-        self.doc.recompute()
+        sketch = self.doc.getObject("GuiSketch")
+        if sketch is None:
+            sketch = self.doc.addObject("Sketcher::SketchObject", "GuiSketch")
+            sketch.MapMode = "FlatFace"
+            self.doc.recompute()
 
         # Select target using use_selected_target
         Gui.Selection.clearSelection()
@@ -120,7 +129,7 @@ class TestRealFreeCADGui(unittest.TestCase):
         panel.bind_btn.click()
 
         # Verify selector object exists in document
-        selectors = [o for o in self.doc.Objects if o.TypeId == "App::FeaturePython" and hasattr(o, "Query")]
+        selectors = [o for o in self.doc.Objects if hasattr(o, "Query")]
         self.assertTrue(len(selectors) >= 1)
         selector_obj = selectors[-1]
         self.assertEqual(selector_obj.ResolutionStatus, "Resolved")
@@ -135,12 +144,13 @@ class TestRealFreeCADGui(unittest.TestCase):
         self.doc.recompute()
         self.assertAlmostEqual(sketch.Placement.Base.z, 45.0, places=3)
 
-    def _test_05_panel_unbind_workflow(self):
+    def test_05_panel_unbind_workflow(self):
         """Verify unbinding via panel unbind button leaves geometry intact."""
         from fs_gui import FeatureSelectorPanel
         panel = FeatureSelectorPanel.instance()
 
-        sketch = self.doc.GuiSketch
+        sketch = self.doc.getObject("GuiSketch")
+        self.assertIsNotNone(sketch)
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(sketch)
         panel.use_selected_target()
@@ -150,6 +160,8 @@ class TestRealFreeCADGui(unittest.TestCase):
         self.assertIn("Removed 1 explicit binding", panel.status.text())
 
         # Recompute box: sketch should remain at current position without error
+        box = self.doc.getObject("GuiBox")
+        box.Height = 50.0
         self.doc.recompute()
         self.assertAlmostEqual(sketch.Placement.Base.z, 45.0, places=3)
 
@@ -323,23 +335,22 @@ class TestRealFreeCADGui(unittest.TestCase):
         self.assertEqual(selector.expression, 'faces(">Z").edges()')
 
 
-    def _test_06_streamlined_panel_ux(self):
-        """Verify progressive disclosure, help guide, dynamic bind button, and no-target fallback."""
+    def test_06_streamlined_panel_ux(self):
+        """Verify help guide, dynamic bind button, and no-target fallback."""
         from fs_gui import FeatureSelectorPanel
         panel = FeatureSelectorPanel.instance()
 
-        # 1. Test collapsible sections toggle
-        self.assertTrue(panel.routes_section.isCollapsed())
-        panel.routes_section.expand()
-        self.assertFalse(panel.routes_section.isCollapsed())
-        panel.routes_section.collapse()
-        self.assertTrue(panel.routes_section.isCollapsed())
-
-        # 2. Test quick guide action without popup blocking
+        # 1. Test quick guide action without popup blocking
         panel.help_btn.click()
 
-        # 3. Test capture on box face
-        box = self.doc.GuiBox
+        # 2. Test capture on box face
+        box = self.doc.getObject("GuiBox")
+        if box is None:
+            box = self.doc.addObject("Part::Box", "GuiBox")
+            box.Length = 50.0
+            box.Width = 40.0
+            box.Height = 25.0
+            self.doc.recompute()
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(box, "Face6")
         panel.learn()

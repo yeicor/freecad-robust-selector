@@ -4,6 +4,15 @@ Selectors describe geometric/topological intent.  Native names such as ``Face7``
 are generated only when the query is evaluated against the *current* shape and
 are handed to FreeCAD's normal selection/property APIs.  They are never stored as
 the selector's design intent.
+
+Architectural Scope Boundary (MIN-4):
+FreeCAD FeatureSelector is strictly focused on:
+1. Robust semantic geometric selection of topological subelements (faces, edges, vertices).
+2. Transparent parametric binding of selection expressions to native FreeCAD feature properties.
+Strict boundaries:
+- No mesh generation, tessellation modifications, or direct triangle manipulation.
+- No direct modeling, boolean operations, or shape alteration outside of driving native property links.
+- Zero non-native third-party dependencies beyond standard FreeCAD / PySide / OCC runtime.
 """
 from __future__ import annotations
 
@@ -351,6 +360,29 @@ class GeometryItem:
     def solid_count(self) -> int:
         self._ensure_counts()
         return self._solid_count
+
+    @property
+    def is_seam(self) -> bool:
+        if getattr(self.ref, "kind", "") != "Edge" or not hasattr(self.shape, "isSeam"):
+            return False
+        base = getattr(self._obj, "Shape", self._obj)
+        if base and hasattr(base, "Faces"):
+            return any(self.shape.isSeam(f) for f in base.Faces)
+        return False
+
+    @property
+    def is_hole(self) -> bool:
+        if getattr(self.ref, "kind", "") == "Face":
+            return self.hole_count > 0
+        if getattr(self.ref, "kind", "") == "Edge":
+            base = getattr(self._obj, "Shape", self._obj)
+            if base and hasattr(base, "Faces"):
+                for f in base.Faces:
+                    if hasattr(f, "OuterWire"):
+                        outer = f.OuterWire
+                        if any(e.isSame(self.shape) for w in f.Wires if not w.isSame(outer) for e in w.Edges):
+                            return True
+        return False
 
     @property
     def diameter(self) -> float:
@@ -848,13 +880,17 @@ class Selector:
     expression: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        expr = self.expression
+        if not expr and self.steps:
+            from fs_expression import steps_to_expression
+            expr = steps_to_expression(self.steps, self.kind)
         return {
             "kind": self.kind,
             "steps": [s.to_dict() for s in self.steps],
             "expected_count": self.expected_count,
             "name": self.name,
             "version": self.version,
-            "expression": self.expression,
+            "expression": expr,
         }
 
     def to_json(self) -> str:
@@ -868,7 +904,10 @@ class Selector:
             raise ValueError(f"Unsupported selector query version {version}")
         steps = tuple(Step.from_dict(x) for x in data.get("steps", []))
         kind = str(data["kind"])
-        expr = str(data.get("expression", ""))
+        expr = str(data.get("expression", "")).strip()
+        if not expr and steps:
+            from fs_expression import steps_to_expression
+            expr = steps_to_expression(steps, kind)
         return Selector(
             kind=kind,
             steps=steps,

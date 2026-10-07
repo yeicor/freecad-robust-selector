@@ -545,7 +545,7 @@ def plan_selectors(
     if not any(_key(candidate) in target_keys for candidate in pool):
         return []
     if _same_target(pool, target_keys):
-        selector = Selector(kind, (), len(target_keys), "planned")
+        selector = Selector(kind, (), len(target_keys), "planned", expression="")
         return [Plan(selector, _plan_score(()), selector.describe())]
     positions = required_positions
     if positions is None:
@@ -585,7 +585,7 @@ def complete_selector(
     prefix = tuple(prefix_steps)
     positions = dict(forced_positions or {})
     if not prefix and _same_target(pool, target_keys) and not positions:
-        selector = Selector(kind, (), len(target_keys), "planned")
+        selector = Selector(kind, (), len(target_keys), "planned", expression="")
         return [Plan(selector, _plan_score(()), selector.describe())]
     return _search(
         pool,

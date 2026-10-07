@@ -324,6 +324,34 @@ class TestCadQueryExpressions(unittest.TestCase):
         highlighter.rehighlight()
         self.assertFalse(editor.document().isEmpty())
 
+    def test_13_conditional_clustering_and_seam_tags(self):
+        """Verify conditional clustering selectors (EXP-2) and seam/hole tags (EXP-3)."""
+        # Test seam on cylinder
+        cyl = self.doc.addObject("Part::Feature", "Cyl")
+        cyl.Shape = Part.makeCylinder(10.0, 30.0)
+        self.doc.recompute()
+        seam_edges = evaluate_expression(cyl, ":seam", kind="Edge")
+        self.assertEqual(len(seam_edges), 1)
+
+        # Test hole tag on plate with drilled hole
+        plate = self.doc.addObject("Part::Feature", "PlateHole")
+        b = Part.makeBox(50, 50, 10)
+        hole = Part.makeCylinder(5, 20, App.Vector(25, 25, -5))
+        plate.Shape = b.cut(hole)
+        self.doc.recompute()
+
+        # Face with hole
+        hole_faces = evaluate_expression(plate, ":hole", kind="Face")
+        self.assertTrue(len(hole_faces) >= 1)
+
+        # Edge of hole
+        hole_edges = evaluate_expression(plate, ":hole", kind="Edge")
+        self.assertEqual(len(hole_edges), 2)  # Top and bottom circles of the hole
+
+        # Conditional clustering: >>length[!=0]
+        edges_nonzero = evaluate_expression(plate, ">>length[!=0]", kind="Edge")
+        self.assertEqual(len(edges_nonzero), len(plate.Shape.Edges))
+
 
 if __name__ == "__main__":
     unittest.main()

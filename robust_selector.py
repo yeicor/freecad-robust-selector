@@ -2,6 +2,12 @@
 
 This module intentionally has no FreeCADGui dependency, so selectors can be
 constructed and evaluated from FreeCAD's Python console or from automation code.
+
+Architectural Scope Boundary (MIN-4):
+FreeCAD FeatureSelector is strictly focused on robust semantic geometric selection
+and transparent property binding.
+Strict boundaries: Strictly forbids mesh generation, direct modeling/booleans,
+or non-native dependencies outside FreeCAD / PySide / OCC.
 """
 from __future__ import annotations
 

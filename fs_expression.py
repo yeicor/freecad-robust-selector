@@ -195,6 +195,44 @@ class MetricClusterFilter(Filter):
             return max(clusters, key=len)
         if sel_str in ("unique", "single"):
             return [it for cl in clusters if len(cl) == 1 for it in cl]
+        if sel_str in ("all_equal", "equal"):
+            return [it for cl in clusters for it in cl] if len(clusters) == 1 else []
+        if sel_str.startswith("!="):
+            try:
+                target_v = float(sel_str[2:].strip() or 0.0)
+                return [it for cl in clusters for it in cl if abs(it.metric(self.metric) - target_v) > self.tolerance]
+            except (ValueError, TypeError):
+                pass
+        if sel_str.startswith("=="):
+            try:
+                target_v = float(sel_str[2:].strip() or 0.0)
+                return [it for cl in clusters for it in cl if abs(it.metric(self.metric) - target_v) <= self.tolerance]
+            except (ValueError, TypeError):
+                pass
+        if sel_str.startswith(">="):
+            try:
+                target_v = float(sel_str[2:].strip() or 0.0)
+                return [it for cl in clusters for it in cl if it.metric(self.metric) >= target_v - self.tolerance]
+            except (ValueError, TypeError):
+                pass
+        if sel_str.startswith(">"):
+            try:
+                target_v = float(sel_str[1:].strip() or 0.0)
+                return [it for cl in clusters for it in cl if it.metric(self.metric) > target_v + self.tolerance]
+            except (ValueError, TypeError):
+                pass
+        if sel_str.startswith("<="):
+            try:
+                target_v = float(sel_str[2:].strip() or 0.0)
+                return [it for cl in clusters for it in cl if it.metric(self.metric) <= target_v + self.tolerance]
+            except (ValueError, TypeError):
+                pass
+        if sel_str.startswith("<"):
+            try:
+                target_v = float(sel_str[1:].strip() or 0.0)
+                return [it for cl in clusters for it in cl if it.metric(self.metric) < target_v - self.tolerance]
+            except (ValueError, TypeError):
+                pass
         if ":" in sel_str:
             parts = sel_str.split(":")
             start = int(parts[0]) if parts[0] else None
@@ -284,15 +322,38 @@ class PerpendicularFilter(Filter):
         return f"#{dir_name}"
 
 
+TYPE_NORM = {
+    "PLANAR": "PLANE",
+    "PLANE": "PLANE",
+    "LINEAR": "LINE",
+    "LINE": "LINE",
+    "CIRCULAR": "CIRCLE",
+    "CIRCLE": "CIRCLE",
+    "CYLINDRICAL": "CYLINDER",
+    "CYLINDER": "CYLINDER",
+    "SPHERICAL": "SPHERE",
+    "SPHERE": "SPHERE",
+    "CONICAL": "CONE",
+    "CONE": "CONE",
+    "TOROIDAL": "TORUS",
+    "TORUS": "TORUS",
+}
+
+
 class TypeFilter(Filter):
     """%Plane, %Cylinder, %Line, %Circle, etc."""
 
     def __init__(self, geom_type: str):
-        self.geom_type = geom_type.strip().upper()
+        raw = geom_type.strip().upper()
+        self.geom_type = TYPE_NORM.get(raw, raw)
 
     def apply(self, items: Sequence[GeometryItem]) -> list[GeometryItem]:
         target = self.geom_type
-        return [item for item in items if item.geom_type == target or item.geom_type.endswith(target)]
+        return [
+            item for item in items
+            if TYPE_NORM.get(item.geom_type.upper(), item.geom_type.upper()) == target
+            or item.geom_type.upper().endswith(target)
+        ]
 
     def describe(self) -> str:
         return f"%{self.geom_type.capitalize()}"
@@ -318,8 +379,10 @@ class TagFilter(Filter):
             return [it for it in items if getattr(it, "adjacent_face_count", 0) == 1]
         if t == "manifold":
             return [it for it in items if getattr(it, "adjacent_face_count", 0) == 2]
+        if t == "seam":
+            return [it for it in items if getattr(it, "is_seam", False) or (getattr(it, "adjacent_face_count", 0) == 1 and it.kind == "Edge")]
         if t in ("hole", "inner"):
-            return [it for it in items if getattr(it, "hole_count", 0) > 0]
+            return [it for it in items if getattr(it, "is_hole", False) or getattr(it, "hole_count", 0) > 0]
         if t == "planar":
             return [it for it in items if "PLANE" in getattr(it, "geom_type", "")]
         if t == "cylindrical":
@@ -1394,8 +1457,20 @@ def steps_to_expression(steps: Sequence[Any], kind: str) -> str:
         elif op == "filter":
             name = str(args.get("name", ""))
             val = args.get("value")
-            if name in ("planar", "cylindrical", "linear", "circular"):
-                parts.append(f"%{name.capitalize()}")
+            if name in ("planar", "plane"):
+                parts.append("%Plane")
+            elif name in ("cylindrical", "cylinder"):
+                parts.append("%Cylinder")
+            elif name in ("linear", "line"):
+                parts.append("%Line")
+            elif name in ("circular", "circle"):
+                parts.append("%Circle")
+            elif name in ("spherical", "sphere"):
+                parts.append("%Sphere")
+            elif name in ("conical", "cone"):
+                parts.append("%Cone")
+            elif name in ("toroidal", "torus"):
+                parts.append("%Torus")
             elif name == "axis_parallel":
                 parts.append(f"|{str(val).upper()}")
             elif name == "axis_perpendicular":

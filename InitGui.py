@@ -1,4 +1,11 @@
-"""FreeCAD Robust Selector workbench GUI initialization."""
+"""FreeCAD Robust Selector workbench GUI initialization.
+
+Architectural Scope Boundary (MIN-4):
+FreeCAD FeatureSelector is strictly focused on robust semantic geometric selection
+and transparent property binding.
+Strict boundaries: Strictly forbids mesh generation, direct modeling/booleans,
+or non-native dependencies outside FreeCAD / PySide / OCC.
+"""
 from __future__ import annotations
 
 import inspect

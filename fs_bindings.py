@@ -727,7 +727,7 @@ def binding_matches_target(selector_obj: Any, record: dict[str, Any], target_obj
     )
 
 
-def bind_selector(selector_obj: Any, target_obj: Any, prop_name: str, mode: str, original_value: Any = None, proxy: Optional[bool] = None) -> dict[str, Any]:
+def bind_selector(selector_obj: Any, target_obj: Any, prop_name: str, mode: Optional[str] = None, original_value: Any = None, proxy: Optional[bool] = None) -> dict[str, Any]:
     """Create/update one explicit binding and establish the native dependency.
 
     ``proxy=True`` means the native property addresses the selector's own
@@ -738,6 +738,8 @@ def bind_selector(selector_obj: Any, target_obj: Any, prop_name: str, mode: str,
     positive errors.  When ``proxy`` is None it defaults to True for
     ``AttachmentSupport`` LinkSub bindings and False otherwise.
     """
+    if mode is None or str(mode).lower() == "robust":
+        mode = property_mode(target_obj, prop_name) or "LinkSub"
     if proxy is None:
         proxy = str(prop_name) == "AttachmentSupport" and str(mode) == "LinkSub"
     if not is_property_writable(target_obj, prop_name):
@@ -780,7 +782,26 @@ def unbind_selector(selector_obj: Any, target_name: Optional[str] = None, prop_n
             removed += 1
             target = _find_doc_object(doc, str(record.get("target", "")))
             if target is not None:
-                _remove_target_metadata(target, selector_obj, str(record.get("property", "")))
+                prop = str(record.get("property", ""))
+                _remove_target_metadata(target, selector_obj, prop)
+                if hasattr(target, "AttachmentSupport") and prop == "AttachmentSupport":
+                    import FreeCAD as App
+                    cur_plc = App.Placement(target.Placement) if hasattr(target, "Placement") and App else None
+                    try:
+                        target.AttachmentSupport = []
+                        if hasattr(target, "MapMode"):
+                            target.MapMode = "Deactivated"
+                        if cur_plc:
+                            target.Placement = cur_plc
+                    except Exception:
+                        pass
+                else:
+                    val = getattr(target, prop, None)
+                    if hasattr(val, "Name") and val is selector_obj:
+                        try:
+                            setattr(target, prop, None)
+                        except Exception:
+                            pass
         else:
             kept.append(record)
     _write_binding_records(selector_obj, kept)
